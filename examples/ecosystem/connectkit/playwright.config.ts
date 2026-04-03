@@ -3,13 +3,13 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests",
   use: {
-    baseURL: "http://localhost:5173",
+    baseURL: "http://localhost:3000",
   },
   webServer: {
     command: "yarn dev",
-    url: "http://localhost:5173",
+    url: "http://localhost:3000",
     reuseExistingServer: !process.env.CI,
-    cwd: ".repo/examples/vite",
+    cwd: ".repo/examples/cra",
   },
   projects: [
     {
