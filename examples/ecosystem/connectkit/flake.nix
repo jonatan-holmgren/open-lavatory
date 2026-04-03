@@ -15,13 +15,16 @@
       pkgs = nixpkgs.legacyPackages.${system};
     in {
       devShells.default = pkgs.mkShell {
-        packages = [ pkgs.git pkgs.nodejs_20 pkgs.yarn ];
+        packages = [ pkgs.git pkgs.nodejs_24 pkgs.yarn ];
         shellHook = ''
+          if [ -n "$CI" ] && [ -d .repo ]; then
+            rm -rf .repo
+          fi
           if [ ! -d .repo ]; then
             git clone ${upstreamRepo} .repo
             git -C .repo checkout ${upstreamCommit}
             for patch in $(find patches -name "*.patch" | sort); do
-              git -C .repo apply "$patch"
+              git -C .repo apply "../$patch"
             done
             (cd .repo && yarn install)
           fi
