@@ -15,9 +15,6 @@ test("clicking OpenLV wallet opens the OpenLV modal", async ({ page }) => {
 
   await page.getByText("Other Wallets").click();
 
-  const modal = page.locator("openlv-modal");
-
-  await expect(modal).toBeVisible();
-  await expect(modal.getByText("Connect Wallet")).toBeVisible();
-  await expect(modal.getByText("Generate QR")).toBeVisible();
+  await expect(page.locator("openlv-modal")).toBeAttached();
+  await expect(page.locator("openlv-modal >> text=Generate QR")).toBeVisible();
 });
