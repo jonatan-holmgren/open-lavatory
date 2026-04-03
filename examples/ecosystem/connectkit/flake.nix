@@ -26,7 +26,7 @@
             for patch in $(find patches -name "*.patch" | sort); do
               git -C .repo apply "../$patch"
             done
-            (cd .repo && yarn install)
+            (cd .repo && yarn install && yarn build)
           fi
           echo "cd .repo/examples/vite && yarn dev"
         '';
