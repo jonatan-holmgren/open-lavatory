@@ -6,7 +6,7 @@ export default defineConfig({
     baseURL: "http://localhost:3000",
   },
   webServer: {
-    command: "yarn dev",
+    command: "BROWSER=none yarn dev",
     url: "http://localhost:3000",
     reuseExistingServer: !process.env.CI,
     cwd: ".repo/examples/cra",
