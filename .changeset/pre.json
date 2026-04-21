@@ -25,7 +25,8 @@
     "@openlv/sandbox": "0.0.0",
     "@openlv/react-native": "0.0.1-beta.0",
     "openlv": "0.0.1-beta.0",
-    "@openlv/tests": "0.0.0"
+    "@openlv/tests": "0.0.0",
+    "@openlv/ecosystem": "0.0.1"
   },
   "changesets": [
     "beige-squids-heal",
@@ -47,6 +48,7 @@
     "rare-moles-repeat",
     "rich-peaches-fry",
     "shiny-singers-wash",
+    "six-cases-ask",
     "slow-impalas-flash",
     "spotty-books-tickle",
     "tame-tips-watch",
