@@ -6,6 +6,8 @@ test.beforeEach(async ({ page }) => {
     // @ts-expect-error: Dumb
     document.querySelector("#webpack-dev-server-client-overlay")?.remove();
   });
+
+  await page.getByRole("button", { name: /connect wallet/i }).click();
 });
 
 test("OpenLV wallet appears in the wallet list", async ({ page }) => {
