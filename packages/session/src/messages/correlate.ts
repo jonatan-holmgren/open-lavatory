@@ -1,6 +1,6 @@
 import type { EventEmitter } from "eventemitter3";
 
-import type { SessionMessageAck, SessionMessageResponse } from "./index.js";
+import type { SessionMessageAck, SessionMessageResponse, SessionPayload } from "./index.js";
 
 export type CorrelationEvents = {
   message: SessionMessageAck | SessionMessageResponse;
@@ -20,7 +20,7 @@ export const awaitCorrelatedResponse = (
   messageId: string,
   ackTimeoutMs: number,
   responseTimeoutMs: number,
-): Promise<unknown> => new Promise((resolve, reject) => {
+): Promise<SessionPayload> => new Promise((resolve, reject) => {
   let isAckReceived = false;
   // eslint-disable-next-line prefer-const
   let ackTimer: ReturnType<typeof setTimeout> | undefined;
