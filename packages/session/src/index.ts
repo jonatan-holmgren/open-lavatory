@@ -22,6 +22,7 @@ import {
 } from "@openlv/signaling";
 import {
   Status as TransportStatus,
+  type JsonValue,
   type TransportLayer,
   type TransportLayerFunction,
   type TransportMessage,
@@ -35,12 +36,11 @@ import type {
   SessionMessage,
   SessionMessageAck,
   SessionMessageResponse,
-  SessionPayload,
 } from "./messages/index.js";
 import { log } from "./utils/log.js";
 
 export { loadSignaling, loadTransport } from "./dynamic.js";
-export type { SessionMessage, SessionPayload } from "./messages/index.js";
+export type { SessionMessage } from "./messages/index.js";
 
 // `peerInfo` is part of the session's surface, so consumers must be able to
 // name its type without reaching into @openlv/signaling.
@@ -74,10 +74,10 @@ export type Session = {
   connect(): Promise<void>;
   close(): Promise<void>;
   send(
-    message: SessionPayload,
+    message: JsonValue,
     ackTimeout?: number,
     responseTimeout?: number,
-  ): Promise<SessionPayload>;
+  ): Promise<JsonValue>;
   emitter: EventEmitter<SessionEvents>;
   _internal: {
     signal: SignalingLayer;
@@ -94,7 +94,7 @@ export type Session = {
 export const createSession = async (
   initParameters: SessionLinkParameters,
   transportLayers: TransportLayerFunction[],
-  onMessage: (message: SessionPayload) => Promise<SessionPayload>,
+  onMessage: (message: JsonValue) => Promise<JsonValue>,
   options?: SessionOptions,
 ): Promise<Session> => {
   if (transportLayers.length === 0) {
@@ -440,7 +440,7 @@ export const createSession = async (
       };
     },
     async send(
-      message: SessionPayload,
+      message: JsonValue,
       ackTimeout: number = 10_000,
       responseTimeout: number = 60 * 60_000,
     ) {
@@ -474,7 +474,7 @@ export const createSession = async (
  */
 export const connectSession = async (
   connectionUrl: string,
-  onMessage: (message: SessionPayload) => Promise<SessionPayload>,
+  onMessage: (message: JsonValue) => Promise<JsonValue>,
   transports: TransportLayerFunction[],
   options?: SessionOptions,
 ): Promise<Session> => {
