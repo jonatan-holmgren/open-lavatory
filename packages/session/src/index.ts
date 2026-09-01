@@ -201,7 +201,7 @@ export const createSession = async (
     },
     decrypt,
     isHost,
-    onmessage: async (message: { type: string; payload: object; messageId: string; }) => {
+    onmessage: async (message) => {
       log("Session: received message from transport", message);
 
       if (message["type"] === "close") {
@@ -211,6 +211,12 @@ export const createSession = async (
       }
 
       if (message["type"] === "request") {
+        if (message.payload === undefined) {
+          log("dropping request without payload", message);
+
+          return;
+        }
+
         const messageId = message["messageId"] as string;
 
         try {
