@@ -32,11 +32,7 @@ import { EventEmitter } from "eventemitter3";
 import { loadSignaling } from "./dynamic.js";
 import type { SessionEvents } from "./events.js";
 import { awaitCorrelatedResponse, type CorrelationEvents } from "./messages/correlate.js";
-import type {
-  SessionMessage,
-  SessionMessageAck,
-  SessionMessageResponse,
-} from "./messages/index.js";
+import type { SessionMessage } from "./messages/index.js";
 import { log } from "./utils/log.js";
 
 export { loadSignaling, loadTransport } from "./dynamic.js";
@@ -58,6 +54,24 @@ export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
 
 export type SessionOptions = {
   info?: PeerInfo;
+};
+
+const isSessionMessage = (message: object): message is SessionMessage => {
+  if (!("type" in message) || typeof message.type !== "string") {
+    return false;
+  }
+
+  // `close` is the only message that carries neither an id nor a payload.
+  if (message.type === "close") {
+    return true;
+  }
+
+  if (!("messageId" in message) || typeof message.messageId !== "string") {
+    return false;
+  }
+
+  return message.type === "ack"
+    || ((message.type === "request" || message.type === "response") && "payload" in message);
 };
 
 /**
@@ -204,6 +218,12 @@ export const createSession = async (
     onmessage: async (message) => {
       log("Session: received message from transport", message);
 
+      if (!isSessionMessage(message)) {
+        log("dropping invalid session message", message);
+
+        return;
+      }
+
       if (message["type"] === "close") {
         await teardown();
 
@@ -246,7 +266,7 @@ export const createSession = async (
 
       if (message["type"] === "response" || message["type"] === "ack") {
         // Both acks and responses are forwarded to the send() correlator.
-        messages.emit("message", message as SessionMessageAck | SessionMessageResponse);
+        messages.emit("message", message);
       }
     },
     async subsend(message) {
