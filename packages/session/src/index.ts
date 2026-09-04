@@ -22,7 +22,6 @@ import {
 } from "@openlv/signaling";
 import {
   Status as TransportStatus,
-  type JsonValue,
   type TransportLayer,
   type TransportLayerFunction,
   type TransportMessage,
@@ -88,10 +87,10 @@ export type Session = {
   connect(): Promise<void>;
   close(): Promise<void>;
   send(
-    message: JsonValue,
+    message: unknown,
     ackTimeout?: number,
     responseTimeout?: number,
-  ): Promise<JsonValue>;
+  ): Promise<unknown>;
   emitter: EventEmitter<SessionEvents>;
   _internal: {
     signal: SignalingLayer;
@@ -108,7 +107,7 @@ export type Session = {
 export const createSession = async (
   initParameters: SessionLinkParameters,
   transportLayers: TransportLayerFunction[],
-  onMessage: (message: JsonValue) => Promise<JsonValue>,
+  onMessage: (message: unknown) => Promise<unknown>,
   options?: SessionOptions,
 ): Promise<Session> => {
   if (transportLayers.length === 0) {
@@ -264,7 +263,7 @@ export const createSession = async (
         }
       }
 
-      if (message["type"] === "response" || message["type"] === "ack") {
+      else if (message["type"] === "response" || message["type"] === "ack") {
         // Both acks and responses are forwarded to the send() correlator.
         messages.emit("message", message);
       }
@@ -466,7 +465,7 @@ export const createSession = async (
       };
     },
     async send(
-      message: JsonValue,
+      message: unknown,
       ackTimeout: number = 10_000,
       responseTimeout: number = 60 * 60_000,
     ) {
@@ -500,7 +499,7 @@ export const createSession = async (
  */
 export const connectSession = async (
   connectionUrl: string,
-  onMessage: (message: JsonValue) => Promise<JsonValue>,
+  onMessage: (message: unknown) => Promise<unknown>,
   transports: TransportLayerFunction[],
   options?: SessionOptions,
 ): Promise<Session> => {
