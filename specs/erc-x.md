@@ -1,6 +1,6 @@
 ---
-title: open-lavatory Wallet-Dapp Transport Layer
-description: A wire protocol for establishing wallet-dapp EIP-1193-compatible transport.
+title: Open Lavatory Connectivity Protocol
+description: A connectivity protocol for establishing wallet-dapp EIP-1193-compatible transport.
 author: Luc van Kampen (@lucemans) <luc.van.kampen@ethereum.org>
 discussions-to: TBD
 status: Draft
@@ -12,7 +12,7 @@ requires: 1193
 
 ## Abstract
 
-This specification defines `open-lavatory`, hereafter `openlv`, an Ethereum wallet-dapp wire protocol for session establishment and transport of EIP-1193 messages.
+This specification defines `open-lavatory`, hereafter `openlv`, an Ethereum wallet-dapp connectivity protocol for session establishment and transport of EIP-1193 messages.
 `openlv` standardizes a bootstrap URI, encrypted signaling frames, transport negotiation messages, a correlated session message envelope, and an optional session resumption model.
 It builds upon the wallet pairing flow introduced by [ERC-1328](./eip-1328.md).
 
