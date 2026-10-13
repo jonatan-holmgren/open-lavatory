@@ -1,8 +1,10 @@
+/* eslint-disable max-lines */
 import {
   decodeConnectionURL,
   type Observable,
   observable,
   OPENLV_PROTOCOL_VERSION,
+  parseSessionConnectionParameters,
   type SessionConnectionParameters,
   type SessionHandshakeParameters,
   type SessionLinkParameters,
@@ -18,6 +20,7 @@ import {
   type PeerCapabilities,
   type PeerInfo,
   type SignalingLayer,
+  type SignalingResumeState,
   Status as SignalStatus,
   validatePeerInfo,
 } from "@openlv/signaling";
@@ -35,14 +38,13 @@ import { awaitCorrelatedResponse, type CorrelationEvents } from "./messages/corr
 import type {
   SessionMessage,
   SessionMessageAck,
+  SessionMessageRequest,
   SessionMessageResponse,
 } from "./messages/index.js";
+import { respondToRequest } from "./messages/index.js";
 import { log } from "./utils/log.js";
 
 export { loadSignaling, loadTransport } from "./dynamic.js";
-
-// `peerInfo` is part of the session's surface, so consumers must be able to
-// name its type without reaching into @openlv/signaling.
 export type { PeerInfo } from "@openlv/signaling";
 
 export const SessionStatus = {
@@ -57,6 +59,10 @@ export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
 
 export type SessionOptions = {
   info?: PeerInfo;
+  /** Called synchronously before a resumed counter is sent. */
+  onConnectionParametersChange?: (
+    parameters: SessionConnectionParameters,
+  ) => void;
 };
 
 /**
@@ -82,11 +88,6 @@ export type Session = {
   };
 };
 
-/**
- * OpenLV Session
- *
- * https://openlv.sh/api/session
- */
 export const createSession = async (
   initParameters: SessionLinkParameters,
   transportLayers: TransportLayerFunction[],
@@ -130,6 +131,20 @@ export const createSession = async (
     ...(options?.info && { info: options.info }),
   };
 
+  const savedConnection = parseSessionConnectionParameters(initParameters);
+  let resumeState: SignalingResumeState = {
+    pairingId: savedConnection?.pairingId ?? sessionId,
+    lastCounter: savedConnection?.lastCounter ?? 0,
+    lastSeenCounter: savedConnection?.lastSeenCounter ?? 0,
+    lastSeenAckCounter: savedConnection?.lastSeenAckCounter ?? 0,
+  };
+  const isResuming = savedConnection !== undefined;
+  let selectedTransportId = savedConnection?.transportId;
+  const persistResumeState = (state: SignalingResumeState) => {
+    resumeState = state;
+    options?.onConnectionParametersChange?.(connectionParameters());
+  };
+
   const [status, setStatus] = observable<SessionStatus>(SessionStatus.CREATED);
   const [lastError, setLastError] = observable<string | undefined>(undefined);
   const [peerInfo, setPeerInfo] = observable<PeerInfo | undefined>(undefined);
@@ -138,11 +153,8 @@ export const createSession = async (
     if (lastError.get() === undefined) setLastError(reason);
   };
 
-  const updateStatus = (newStatus: SessionStatus) => {
-    log("updateStatus", newStatus);
-    setStatus(newStatus);
-  };
-
+  // Any open send() must reject when the session ends, otherwise callers wait
+  // out the full response timeout.
   status.subscribe((current) => {
     if (current === SessionStatus.DISCONNECTED) {
       messages.emit("ended", lastError.get() ?? "Session closed");
@@ -154,130 +166,102 @@ export const createSession = async (
     topic: sessionId,
     url: server,
   });
-  const canEncrypt = () => signal.peerKey.get() !== undefined;
+  const encrypt = async (message: string) => {
+    // Only resume signaling sends before the pinned peer is authenticated.
+    const key = signal.peerKey.get() ?? relyingEncryptionKey;
+
+    if (!key) {
+      throw new Error("Relying party public key not found");
+    }
+
+    return await key.encrypt(message);
+  };
   const signal = await signaling({
     h: hash,
-    canEncrypt,
-    async encrypt(message) {
-      const key = signal.peerKey.get();
-
-      if (!key) {
-        throw new Error("Relying party public key not found");
-      }
-
-      return await key.encrypt(message);
-    },
+    canEncrypt: () => signal.peerKey.get() !== undefined,
+    encrypt,
     decrypt,
     publicKey: encryptionKey,
     expectedPeerKey: relyingEncryptionKey,
+    resume: {
+      ...resumeState,
+      initiate: isResuming,
+      persist: persistResumeState,
+    },
     k: handshakeKey,
     capabilities,
     isHost,
   });
 
-  signal.peerKey.subscribe((key) => {
-    const role = isHost ? "host" : "client";
-
-    log(`rpKey discovered by ${role}`, key);
-  });
-
-  signal.peerCapabilities.subscribe((received) => {
-    log("peer capabilities received", received);
-    setPeerInfo(received?.info);
-  });
+  signal.peerCapabilities.subscribe(received => setPeerInfo(received?.info));
 
   let transport: TransportLayer | undefined;
+  const connectionParameters = (): SessionConnectionParameters => {
+    const relyingPublicKey = signal.peerKey.get() ?? relyingEncryptionKey;
 
-  const createTransport = (layer: TransportLayerFunction): TransportLayer => layer.create({
-    async encrypt(message) {
-      const key = signal.peerKey.get();
+    if (!relyingPublicKey) {
+      throw new Error("Cannot save session before the peer key is exchanged");
+    }
 
-      if (!key) {
-        throw new Error("Relying party public key not found");
-      }
+    if (!selectedTransportId) {
+      throw new Error("Cannot save session before transport negotiation");
+    }
 
-      return await key.encrypt(message);
-    },
-    decrypt,
-    isHost,
-    onmessage: async (message: { type: string; payload: object; messageId: string; }) => {
-      log("Session: received message from transport", message);
-
-      if (message["type"] === "close") {
-        await teardown();
-
-        return;
-      }
-
-      if (message["type"] === "request") {
-        const messageId = message["messageId"] as string;
-
-        try {
-          // Immediately acknowledge receipt so the sender's ack-timeout does
-          // not fire while the handler (which may await user interaction) runs.
-          await transport?.send({ type: "ack", messageId } satisfies SessionMessage);
-
-          // Notify observers before processing (e.g. wallet UI can show a
-          // pending indicator before the handler resolves).
-          emitter.emit("request", message["payload"] as object);
-
-          const data = await onMessage(message["payload"] as object)
-            // A throwing handler must still answer, otherwise the peer waits
-            // out its full response timeout.
-            .catch(() => ({ error: { code: -32_603, message: "Internal error" } }));
-
-          await transport?.send({
-            type: "response",
-            messageId,
-            payload: data,
-          } satisfies SessionMessage);
-        }
-        catch (error) {
-          log("failed to respond to peer request", error);
-        }
-      }
-
-      if (message["type"] === "response" || message["type"] === "ack") {
-        // Both acks and responses are forwarded to the send() correlator.
-        messages.emit("message", message as SessionMessageAck | SessionMessageResponse);
-      }
-    },
-    async subsend(message) {
-      log("Session: sending trans msg to signal", message);
-      const sessionMessage: SessionMessage = {
-        type: "request",
-        messageId: crypto.randomUUID(),
-        payload: message,
-      };
-
-      await signal.send(sessionMessage);
-    },
-  });
-
-  /**
-   * Sessions resumed with a known peer key never exchange capabilities and
-   * keep the first configured transport.
-   */
-  const selectTransportLayer = (): TransportLayerFunction | undefined => {
-    const peerCaps = signal.peerCapabilities.get();
-
-    if (!peerCaps) return transportLayers[0];
-
-    // The host's preferred transport that the client also supports; both
-    // peers compute the same result independently -- no confirmation round trip.
-    const hostPreference = isHost ? capabilities.transports : peerCaps.transports;
-    const clientSupported = new Set(isHost ? peerCaps.transports : capabilities.transports);
-    const selected = hostPreference.find(transportId => clientSupported.has(transportId));
-
-    return transportLayers.find(layer => layer.transportId === selected);
+    return {
+      version: OPENLV_PROTOCOL_VERSION,
+      sessionId,
+      h: hash,
+      k: handshakeKey.toString(),
+      p: protocol,
+      s: server,
+      relyingPublicKey: relyingPublicKey.toString(),
+      encryptionKey: encryptionKey.toString(),
+      decryptionKey: decryptionKey.toString(),
+      ...resumeState,
+      transportId: selectedTransportId,
+    };
   };
 
-  // Once both peers are present (signaling encrypted) the transport should
-  // connect promptly; if it cannot (e.g. no ICE candidates on a restricted
-  // network) fail loudly instead of sitting in "linking" forever.
+  // Authenticated peers must not remain in LINKING indefinitely.
   const TRANSPORT_LINK_TIMEOUT_MS = 45_000;
   let linkDeadline: ReturnType<typeof setTimeout> | undefined;
   let unsubscribeTransportStatus: (() => void) | undefined;
+  let unsubscribeSignalStatus: (() => void) | undefined;
+  let isStopped = false;
+  let teardownPromise: Promise<void> | undefined;
+  const teardown = () => {
+    if (teardownPromise) return teardownPromise;
+
+    isStopped = true;
+    clearLinkDeadline();
+    signal.off("message", onSignalMessage);
+    signal.off("resume", onSignalResume);
+    signal.off("restart", onSignalRestart);
+    signal.off("error", onSignalError);
+    unsubscribeSignalStatus?.();
+    unsubscribeSignalStatus = undefined;
+    unsubscribeTransportStatus?.();
+    unsubscribeTransportStatus = undefined;
+    const closingTransport = transport;
+
+    transport = undefined;
+    closingTransport?.emitter.off("error", onTransportError);
+    teardownPromise = (async () => {
+      try {
+        await Promise.all([
+          closingTransport?.teardown(),
+          signal.teardown(),
+        ]);
+      }
+      catch (error) {
+        log("session teardown failed", error);
+        setLastErrorIfUnset(error instanceof Error ? error.message : "Session teardown failed");
+      }
+    })();
+    setStatus(SessionStatus.DISCONNECTED);
+
+    return teardownPromise;
+  };
 
   const clearLinkDeadline = () => {
     clearTimeout(linkDeadline);
@@ -285,18 +269,18 @@ export const createSession = async (
   };
 
   const onTransportStateChange = (transportStatus: TransportStatus) => {
-    log("transport state change", transportStatus);
+    if (isStopped) return;
 
     if (transportStatus === TransportStatus.CONNECTED) {
       clearLinkDeadline();
       setLastError(undefined);
-      updateStatus(SessionStatus.CONNECTED);
+      setStatus(SessionStatus.CONNECTED);
     }
 
     if (transportStatus === TransportStatus.ERROR) {
       clearLinkDeadline();
       setLastErrorIfUnset("Peer-to-peer transport failed");
-      updateStatus(SessionStatus.DISCONNECTED);
+      setStatus(SessionStatus.DISCONNECTED);
     }
   };
 
@@ -304,42 +288,129 @@ export const createSession = async (
     if (reason) setLastError(reason);
   };
 
-  const startTransport = () => {
-    if (!transport) {
-      const layer = selectTransportLayer();
-
-      if (!layer) {
-        log("no common transport with peer", capabilities.transports, signal.peerCapabilities.get()?.transports);
-        setLastErrorIfUnset("No common transport with peer");
-        updateStatus(SessionStatus.DISCONNECTED);
-
-        return;
-      }
-
-      log("selected transport", layer.transportId);
-      transport = createTransport(layer);
-      unsubscribeTransportStatus = transport.status.subscribe(onTransportStateChange);
-      transport.emitter.on("error", onTransportError);
-    }
-
+  const armLinkDeadline = () => {
     linkDeadline ??= setTimeout(() => {
       if (status.get() === SessionStatus.CONNECTED) return;
 
       log("transport failed to connect in time");
       setLastErrorIfUnset("Timed out establishing the peer-to-peer connection");
-      updateStatus(SessionStatus.DISCONNECTED);
+      void teardown();
     }, TRANSPORT_LINK_TIMEOUT_MS);
-
-    Promise.resolve(transport.setup()).catch((error) => {
-      log("transport setup failed", error);
-      clearLinkDeadline();
-      setLastErrorIfUnset(error instanceof Error ? error.message : "Transport setup failed");
-      updateStatus(SessionStatus.DISCONNECTED);
-    });
   };
 
+  const onTransportSetupError = (error: unknown) => {
+    log("transport setup failed", error);
+    clearLinkDeadline();
+    setLastErrorIfUnset(error instanceof Error ? error.message : "Transport setup failed");
+    setStatus(SessionStatus.DISCONNECTED);
+  };
+
+  const startTransport = async () => {
+    if (isStopped || transport || !signal.peerKey.get()) return;
+
+    const peerCapabilities = signal.peerCapabilities.get();
+    let transportId = selectedTransportId;
+
+    if (!transportId && peerCapabilities) {
+      const hostPreference = isHost ? capabilities.transports : peerCapabilities.transports;
+      const clientSupported = isHost ? peerCapabilities.transports : capabilities.transports;
+
+      transportId = hostPreference.find(candidate => clientSupported.includes(candidate));
+    }
+
+    const layer = transportLayers.find(layer => layer.transportId === transportId);
+
+    if (!layer) {
+      log("no common transport with peer", capabilities.transports, peerCapabilities?.transports);
+      setLastErrorIfUnset("No common transport with peer");
+      await teardown();
+
+      return;
+    }
+
+    selectedTransportId = layer.transportId;
+    transport = layer.create({
+      encrypt,
+      decrypt,
+      isHost,
+      async onmessage(message) {
+        if (isStopped) return;
+
+        try {
+          if (message.type === "close") {
+            await teardown();
+
+            return;
+          }
+
+          if (transport && message.type === "request") {
+            await respondToRequest(message as SessionMessageRequest, transport, onMessage, emitter);
+          }
+          else if (message.type === "response" || message.type === "ack") {
+            messages.emit("message", message as SessionMessageAck | SessionMessageResponse);
+          }
+        }
+        catch (error) {
+          log("failed to handle peer message", error);
+        }
+      },
+      async subsend(message) {
+        await signal.send({
+          type: "request",
+          messageId: crypto.randomUUID(),
+          payload: message,
+        } satisfies SessionMessage);
+      },
+    });
+    transport.emitter.on("error", onTransportError);
+    unsubscribeTransportStatus = transport.status.subscribe(onTransportStateChange);
+    armLinkDeadline();
+    await transport.setup();
+  };
+
+  const onSignalResume = async () => {
+    if (isStopped) return;
+
+    try {
+      setStatus(SessionStatus.LINKING);
+
+      if (transport) {
+        armLinkDeadline();
+        await transport.renegotiate();
+      }
+      else {
+        await startTransport();
+      }
+    }
+    catch (error) {
+      onTransportSetupError(error);
+    }
+  };
+
+  const onSignalRestart = async () => {
+    if (isStopped) return;
+
+    try {
+      clearLinkDeadline();
+      unsubscribeTransportStatus?.();
+      unsubscribeTransportStatus = undefined;
+      const closingTransport = transport;
+
+      // Detach before teardown yields; ENCRYPTED may install its replacement.
+      transport = undefined;
+      closingTransport?.emitter.off("error", onTransportError);
+      setPeerInfo(undefined);
+      await closingTransport?.teardown();
+    }
+    catch (error) {
+      onTransportSetupError(error);
+    }
+  };
+
+  const onSignalError = (reason: string) => setLastError(reason);
+
   const onSignalMessage = async (message: object) => {
-    log("Session: received message from signaling", message);
+    if (isStopped) return;
 
     const sessionMessage = message as SessionMessage;
 
@@ -347,81 +418,72 @@ export const createSession = async (
       messages.emit("message", sessionMessage);
     }
     else if (sessionMessage.type === "request") {
-      if (!transport) {
-        log("dropping negotiation message: transport not selected yet");
-
-        return;
-      }
+      if (!transport) return;
 
       try {
         await transport.handle(sessionMessage.payload as TransportMessage);
       }
       catch (error) {
-        // Negotiation payloads come from the (untrusted) relay; a malformed
-        // one must not become an unhandled rejection.
         log("failed to handle negotiation message", error);
       }
     }
   };
 
   const onSignalStateChange = (signalStatus: SignalStatus) => {
-    log("signal state change", signalStatus);
+    if (isStopped) return;
 
     if (signalStatus === SignalStatus.READY) {
-      updateStatus(SessionStatus.READY);
+      setStatus(SessionStatus.READY);
     }
 
-    if (
-      (
-        [
-          SignalStatus.HANDSHAKE,
-          SignalStatus.HANDSHAKE_PARTIAL,
-        ] as SignalStatus[]
-      ).includes(signalStatus)
-    ) {
-      updateStatus(SessionStatus.LINKING);
+    if (signalStatus === SignalStatus.HANDSHAKE || signalStatus === SignalStatus.HANDSHAKE_PARTIAL) {
+      setStatus(SessionStatus.LINKING);
     }
 
     if (signalStatus === SignalStatus.ENCRYPTED) {
-      startTransport();
+      void startTransport().catch(onTransportSetupError);
     }
 
     if (signalStatus === SignalStatus.ERROR) {
-      log("signaling error -- marking session disconnected");
       setLastErrorIfUnset("Signaling failed or timed out");
-      updateStatus(SessionStatus.DISCONNECTED);
+      void teardown();
     }
-  };
-
-  let unsubscribeSignalStatus: (() => void) | undefined;
-
-  const teardown = async () => {
-    clearLinkDeadline();
-    signal.off("message", onSignalMessage);
-    unsubscribeSignalStatus?.();
-    unsubscribeTransportStatus?.();
-    transport?.emitter.off("error", onTransportError);
-    await Promise.all([
-      transport?.teardown(),
-      signal.teardown(),
-    ]);
-    updateStatus(SessionStatus.DISCONNECTED);
   };
 
   return {
     connect: async () => {
-      updateStatus(SessionStatus.SIGNALING);
-      log("connecting to session, isHost:", isHost);
+      if (isStopped) throw new Error("Session closed");
+
+      setStatus(SessionStatus.SIGNALING);
 
       signal.on("message", onSignalMessage);
+      signal.on("resume", onSignalResume);
+      signal.on("restart", onSignalRestart);
+      signal.on("error", onSignalError);
       unsubscribeSignalStatus = signal.status.subscribe(onSignalStateChange);
 
-      await signal.setup();
+      try {
+        await signal.setup();
+
+        if (isResuming && !isStopped) {
+          await signal.resume();
+        }
+      }
+      catch (error) {
+        setLastErrorIfUnset(error instanceof Error ? error.message : "Signaling setup failed");
+        await teardown();
+
+        throw error;
+      }
     },
     async close() {
-      log("session teardown");
-      await transport?.send({ type: "close" } satisfies SessionMessage)
-        .catch(error => log("failed to send close to peer", error));
+      try {
+        await transport?.send({ type: "close" } satisfies SessionMessage);
+      }
+      catch (error) {
+        log("failed to send close to peer", error);
+      }
+
       await teardown();
     },
     status,
@@ -438,25 +500,7 @@ export const createSession = async (
         s: server,
       };
     },
-    getConnectionParameters() {
-      const relyingPublicKey = signal.peerKey.get();
-
-      if (!relyingPublicKey) {
-        throw new Error("Cannot save session before the peer key is exchanged");
-      }
-
-      return {
-        version: OPENLV_PROTOCOL_VERSION,
-        sessionId,
-        h: hash,
-        k: handshakeKey.toString(),
-        p: protocol,
-        s: server,
-        relyingPublicKey: relyingPublicKey.toString(),
-        encryptionKey: encryptionKey.toString(),
-        decryptionKey: decryptionKey.toString(),
-      };
-    },
+    getConnectionParameters: connectionParameters,
     async send(
       message: object,
       ackTimeout: number = 10_000,

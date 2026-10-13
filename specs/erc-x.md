@@ -12,8 +12,8 @@ requires: 1193
 
 ## Abstract
 
-This specification defines `open-lavatory`, hereafter `openlv`, an Ethereum wallet-dapp connectivity protocol for session establishment and transport of EIP-1193 messages.
-`openlv` standardizes a bootstrap URI, encrypted signaling frames, transport negotiation messages, a correlated session message envelope, and an optional session resumption model.
+This specification defines `open-lavatory`, hereafter `openlv`, an Ethereum wallet-dapp wire protocol for session establishment and transport of EIP-1193 messages.
+`openlv` standardizes a bootstrap URI, encrypted signaling frames, transport negotiation messages, a correlated session message envelope, and an authenticated session resumption model.
 It builds upon the wallet pairing flow introduced by [ERC-1328](./eip-1328.md).
 
 ## Motivation
@@ -136,7 +136,7 @@ Receivers MUST ignore frames where `recipient` does not match the local role.
 
 After decryption, a signaling payload MUST be valid JSON containing:
 
-- `type`: one of `flash`, `pubkey`, `capabilities`, or `data`
+- `type`: one of `flash`, `pubkey`, `capabilities`, `data`, `resume`, `resume-ack`, or `resume-confirm`
 - `payload`: defined below based on `type`.
 - `timestamp`: time in milliseconds since Unix epoch.
 
@@ -146,6 +146,7 @@ The signaling message types have the following meanings:
 - `pubkey`: carries a peer public key
 - `capabilities`: acknowledges the previous handshake step, negotiates the transport, and carries optional peer metadata
 - `data`: carries post-handshake signaling payloads, including transport negotiation objects
+- `resume`, `resume-ack`, `resume-confirm`: carry the authenticated resumption handshake described in Session Resumption
 
 The `capabilities` payload is:
 
@@ -166,6 +167,41 @@ The `capabilities` payload is:
 Receivers MUST treat `info` as untrusted display data: an implementation that renders or fetches `icon` is responsible for validating it first.
 
 Relays cap message size, so `icon` SHOULD NOT exceed 8192 characters, a limit that testing with common relays showed to be safe, and implementations SHOULD apply sane limits to the other fields.
+
+The resumption payloads are:
+
+```json
+{
+  "version": 1,
+  "pairingId": "<pairing id>",
+  "publicKey": "<sender static public key>",
+  "challenge": "<fresh challenge>",
+  "counter": 42
+}
+```
+
+```json
+{
+  "version": 1,
+  "pairingId": "<pairing id>",
+  "publicKey": "<sender static public key>",
+  "challenge": "<fresh challenge>",
+  "initiatorChallenge": "<echo of the initiator challenge>",
+  "counter": 7
+}
+```
+
+```json
+{
+  "pairingId": "<pairing id>",
+  "proof": "<proof over the resume transcript>"
+}
+```
+
+Every field in the `resume` and `resume-ack` payloads is REQUIRED.
+`counter` MUST be a non-negative safe integer; receivers MUST reject non-integers and negative values.
+`pairingId`, the serialized public keys, and the challenges MUST be bounded strings; receivers MUST reject empty or oversized values.
+`proof` is a lowercase hexadecimal string.
 
 ### Handshake Sequence
 
@@ -260,12 +296,29 @@ After a peer sends or receives `close`, it MUST NOT send further session message
 
 ### Session Resumption
 
-Peers MAY persist session state locally to support later resumption.
-Persisted state SHOULD include `sessionId`, `p`, `s`, `k`, session X25519 key pair, peer public key, and transport configuration.
+Peers MAY persist state locally to resume a pairing after one or both sides restart.
+Persisted state includes the session configuration (`sessionId`, `p`, `s`, `k`), the local X25519 keypair, the pinned peer public key, the negotiated transport identifier, a `pairingId` stable for the lifetime of the pairing, and the replay counters described below.
+In version 1, `pairingId` is the `sessionId` from the original bootstrap URI.
+The local keypair and the pinned peer key are stored serialized; the local storage backend is implementation-specific.
 
-Resumption in version 1 means re-invoking communication using prior local session material.
-It does not guarantee transport continuity.
-Implementations MAY need to reconnect to the signaling infrastructure, re-establish peer public-key signaling, and renegotiate transport.
+A session started from persisted state that carries a `pairingId` resumes instead of running the fresh handshake.
+Resumption does not guarantee transport continuity: the peers reconnect to the signaling infrastructure and renegotiate the transport.
+Resumed peers reuse the persisted transport identifier without exchanging capabilities again; transport negotiation rebuilds the underlying connection, not the transport selection.
+
+Resumption is a three-message handshake carried in peer-key encrypted signaling frames:
+
+1. The initiator sends `resume` to the responder's pinned public key. It carries the `pairingId`, the initiator's static public key, a fresh `challenge`, and an advanced `counter`.
+2. The responder verifies the `pairingId`, that the advertised public key equals the pinned peer key, and that the `counter` advanced. It then replies with `resume-ack`, carrying its own static public key, a fresh `challenge`, an echo of the initiator's challenge in `initiatorChallenge`, and its advanced `counter`.
+3. The initiator verifies the `pairingId`, the pinned public key, the `counter`, and the echoed challenge, then sends `resume-confirm` carrying a `proof`.
+
+`proof` is the lowercase hex encoding of `SHA-256(pairingId | initiatorPublicKey | responderPublicKey | initiatorChallenge | responderChallenge | initiatorCounter | responderCounter)`, where the parts are joined with `|`.
+The responder's fresh `challenge` is delivered only inside the peer-key encrypted `resume-ack`, so only a holder of the pinned private key can compute a `proof` the responder accepts.
+The responder MUST NOT accept a resume before verifying `resume-confirm`.
+
+Implementations MUST ignore a resume whose `pairingId` or advertised public key does not match, whose `counter` is not strictly greater than the highest counter already seen, whose `initiatorChallenge` does not match, or whose `proof` is invalid.
+On any such failure the peer MUST fail closed and require re-pairing through a fresh out-of-band `openlv://` URI.
+Implementations MUST persist each counter high-water update before publishing the corresponding resumption frame. A failed write MUST abort resumption rather than send with an unpersisted counter.
+Resumption MUST have a bounded deadline. Authentication failure or deadline expiry ends the session, invalidates saved pairing state, and requires a fresh bootstrap URI; it MUST NOT silently fall back to the fresh handshake on the failed pairing.
 
 ### Cryptography
 
@@ -293,6 +346,7 @@ base64(ephemeralPublicKey || nonce || ciphertext)
 ```
 
 This same peer-key mechanism is also used to protect payloads exchanged through the negotiated transport layer.
+Session resumption reuses it: resume frames are encrypted to the peers' pinned static public keys, and version 1 does not perform a fresh key agreement for resumed sessions.
 
 These cryptographic mechanisms define the current interoperable behavior, but future revisions MAY define alternative suites or explicit cryptographic negotiation.
 
@@ -365,9 +419,12 @@ Implementations MUST use fresh randomness for IVs, nonces, ephemeral keys, and g
 Signaling infrastructure is untrusted and can observe metadata such as timing, size, and namespace.
 Implementations SHOULD validate decrypted JSON structure and expected message types before acting on payloads.
 Implementations SHOULD apply request timeouts and resource limits.
-Replay protection is not fully standardized in version 1 and SHOULD be improved in future revisions.
 
-Persisted session state is sensitive and SHOULD be stored using the strongest platform protections available.
+Resumption MUST use the monotonic per-pairing `counter` for replay protection, and peers MUST reject a resume whose counter does not strictly advance.
+Because resumed sessions reuse the handshake's peer-key encryption to the pinned static keys rather than a fresh key agreement, version 1 resumption does not provide forward secrecy.
+A failed `pairingId`, pin, counter, challenge, or `proof` check MUST fail closed and require re-pairing through a fresh out-of-band `openlv://` URI.
+
+Persisted session state is sensitive. Browser implementations MAY use localStorage, where scripts running on the same origin can access the serialized private keys.
 Implementations SHOULD allow users to disconnect and delete saved session state.
 
 ## Copyright

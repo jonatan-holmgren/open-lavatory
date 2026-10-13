@@ -1,3 +1,6 @@
+import { OPENLV_PROTOCOL_VERSION } from "./url/index.js";
+import { isObject, isReplayCounter } from "./validation.js";
+
 // typescript type for 32 character hex string
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export type Hex<_L> = string;
@@ -29,8 +32,18 @@ export type SessionConnectionParameters = SessionHandshakeParameters & {
   relyingPublicKey: string;
   // Our serialized public key.
   encryptionKey: string;
-  // Our serialized private key. Store this with platform-provided protection.
+  // Our serialized private key.
   decryptionKey: string;
+  // Durable pairing identity.
+  pairingId: string;
+  // Transport negotiated before persistence; both peers reuse it on resume.
+  transportId: string;
+  // Locally sent resume/ack high-water mark.
+  lastCounter: number;
+  // Highest resume counter received from the peer.
+  lastSeenCounter: number;
+  // Highest resume-ack counter received from the peer.
+  lastSeenAckCounter: number;
 };
 
 export type SessionCreationParameters = Pick<
@@ -42,3 +55,41 @@ export type SessionLinkParameters
   = | SessionConnectionParameters
     | SessionHandshakeParameters
     | SessionCreationParameters;
+
+export const parseSessionConnectionParameters = (
+  value: unknown,
+): SessionConnectionParameters | undefined => {
+  if (!isObject(value)) return undefined;
+
+  const record = value;
+
+  const stringFields = [
+    "sessionId",
+    "h",
+    "k",
+    "p",
+    "s",
+    "relyingPublicKey",
+    "encryptionKey",
+    "decryptionKey",
+    "pairingId",
+    "transportId",
+  ] as const;
+  const counterFields = [
+    "lastCounter",
+    "lastSeenCounter",
+    "lastSeenAckCounter",
+  ] as const;
+
+  if (
+    record["version"] !== OPENLV_PROTOCOL_VERSION
+    || stringFields.some(field => typeof record[field] !== "string" || record[field].length === 0)
+    || (record["pairingId"] as string).length > 64
+    || (record["transportId"] as string).length > 32
+    || counterFields.some(field => !isReplayCounter(record[field]))
+  ) {
+    return undefined;
+  }
+
+  return record as unknown as SessionConnectionParameters;
+};

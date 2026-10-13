@@ -1,3 +1,5 @@
+import { isObject, isReplayCounter, OPENLV_PROTOCOL_VERSION } from "@openlv/core";
+
 export type SignalMessageBase<T extends string, P> = {
   type: T;
   payload: P;
@@ -46,15 +48,64 @@ export type SignalMessageCapabilities = SignalMessageBase<
 
 export type SignalMessageData = SignalMessageBase<"data", object>;
 
+/**
+ * Initiates an authenticated resume of an existing pairing. Encrypted to the
+ * peer's pinned static key, so it is accepted even while already encrypted.
+ */
+export type SignalMessageResume = SignalMessageBase<
+  "resume",
+  {
+    version: number;
+    pairingId: string;
+    publicKey: string;
+    challenge: string;
+    counter: number;
+  }
+>;
+
+/**
+ * Answers a resume. Echoes the initiator's challenge so a stale or replayed
+ * ack cannot complete the handshake.
+ */
+export type SignalMessageResumeAck = SignalMessageBase<
+  "resume-ack",
+  {
+    version: number;
+    pairingId: string;
+    publicKey: string;
+    challenge: string;
+    initiatorChallenge: string;
+    counter: number;
+  }
+>;
+
+/**
+ * Proves the initiator decrypted the responder's fresh challenge, which is only
+ * possible for the holder of the pinned private key.
+ */
+export type SignalMessageResumeConfirm = SignalMessageBase<
+  "resume-confirm",
+  {
+    pairingId: string;
+    proof: string;
+  }
+>;
+
 export type SignalMessage
   = | SignalMessageFlash
     | SignalMessagePubkey
     | SignalMessageCapabilities
-    | SignalMessageData;
+    | SignalMessageData
+    | SignalMessageResume
+    | SignalMessageResumeAck
+    | SignalMessageResumeConfirm;
 
 const MAX_TRANSPORTS = 8;
 const MAX_TRANSPORT_ID_LENGTH = 32;
 const MAX_TEXT_LENGTH = 128;
+const MAX_PAIRING_ID_LENGTH = 64;
+const MAX_CHALLENGE_LENGTH = 128;
+const MAX_PUBLIC_KEY_LENGTH = 128;
 
 // Relay message limits (ntfy in particular) leave little room after base64
 // and encryption overhead; oversized icons would silently fail to deliver,
@@ -87,9 +138,9 @@ export const validatePeerInfo = (info: PeerInfo): string | undefined => {
 };
 
 const parsePeerInfo = (raw: unknown): PeerInfo | undefined => {
-  if (typeof raw !== "object" || raw === null) return undefined;
+  if (!isObject(raw)) return undefined;
 
-  const info = raw as Record<string, unknown>;
+  const info = raw;
 
   if (!isBoundedString(info["identity"], MAX_TEXT_LENGTH)) return undefined;
 
@@ -107,9 +158,9 @@ const parsePeerInfo = (raw: unknown): PeerInfo | undefined => {
 };
 
 export const parseCapabilities = (raw: unknown): PeerCapabilities | undefined => {
-  if (typeof raw !== "object" || raw === null) return undefined;
+  if (!isObject(raw)) return undefined;
 
-  const payload = raw as Record<string, unknown>;
+  const payload = raw;
   const transports = payload["transports"];
 
   if (
@@ -130,11 +181,69 @@ export const parseCapabilities = (raw: unknown): PeerCapabilities | undefined =>
   return { transports, info };
 };
 
-/**
- * Parse and shape-check a decrypted signaling payload. The relay topic is
- * public, so decrypted JSON is still untrusted input: anything that does not
- * match one of the four message shapes is dropped (returns undefined).
- */
+export type ResumePayload = Extract<
+  SignalMessageResume["payload"],
+  object
+>;
+
+const parseResumePayload = (raw: unknown): ResumePayload | undefined => {
+  if (!isObject(raw)) return undefined;
+
+  const payload = raw;
+
+  if (payload["version"] !== OPENLV_PROTOCOL_VERSION) return undefined;
+
+  if (!isBoundedString(payload["pairingId"], MAX_PAIRING_ID_LENGTH)) return undefined;
+
+  if (!isBoundedString(payload["publicKey"], MAX_PUBLIC_KEY_LENGTH)) return undefined;
+
+  if (!isBoundedString(payload["challenge"], MAX_CHALLENGE_LENGTH)) return undefined;
+
+  if (!isReplayCounter(payload["counter"])) return undefined;
+
+  return {
+    version: payload["version"],
+    pairingId: payload["pairingId"],
+    publicKey: payload["publicKey"],
+    challenge: payload["challenge"],
+    counter: payload["counter"],
+  };
+};
+
+const parseResumeAckPayload = (raw: unknown): SignalMessageResumeAck["payload"] | undefined => {
+  if (!isObject(raw)) return undefined;
+
+  const payload = raw;
+
+  if (!isBoundedString(payload["initiatorChallenge"], MAX_CHALLENGE_LENGTH)) return undefined;
+
+  const base = parseResumePayload(raw);
+
+  if (!base) return undefined;
+
+  return {
+    ...base,
+    initiatorChallenge: payload["initiatorChallenge"],
+  };
+};
+
+const parseResumeConfirmPayload = (
+  raw: unknown,
+): SignalMessageResumeConfirm["payload"] | undefined => {
+  if (!isObject(raw)) return undefined;
+
+  const payload = raw;
+
+  if (!isBoundedString(payload["pairingId"], MAX_PAIRING_ID_LENGTH)) return undefined;
+
+  if (typeof payload["proof"] !== "string" || !/^[a-f0-9]{64}$/.test(payload["proof"])) return undefined;
+
+  return {
+    pairingId: payload["pairingId"],
+    proof: payload["proof"],
+  };
+};
+
 export const parseSignalMessage = (raw: string): SignalMessage | undefined => {
   let parsed: unknown;
 
@@ -145,21 +254,20 @@ export const parseSignalMessage = (raw: string): SignalMessage | undefined => {
     return undefined;
   }
 
-  if (typeof parsed !== "object" || parsed === null) return undefined;
+  if (!isObject(parsed)) return undefined;
 
-  const message = parsed as Record<string, unknown>;
+  const message = parsed;
 
   switch (message["type"]) {
     case "flash": {
-      return typeof message["payload"] === "object" && message["payload"] !== null
+      return isObject(message["payload"])
         ? (message as SignalMessageFlash)
         : undefined;
     }
     case "pubkey": {
-      const payload = message["payload"] as Record<string, unknown> | null;
+      const payload = message["payload"];
 
-      return typeof payload === "object"
-        && payload !== null
+      return isObject(payload)
         && typeof payload["publicKey"] === "string"
         ? (message as SignalMessagePubkey)
         : undefined;
@@ -176,9 +284,42 @@ export const parseSignalMessage = (raw: string): SignalMessage | undefined => {
       };
     }
     case "data": {
-      return typeof message["payload"] === "object" && message["payload"] !== null
+      return isObject(message["payload"])
         ? (message as SignalMessageData)
         : undefined;
+    }
+    case "resume": {
+      const payload = parseResumePayload(message["payload"]);
+
+      if (!payload) return undefined;
+
+      return {
+        type: "resume",
+        payload,
+        timestamp: message["timestamp"] as number,
+      };
+    }
+    case "resume-ack": {
+      const payload = parseResumeAckPayload(message["payload"]);
+
+      if (!payload) return undefined;
+
+      return {
+        type: "resume-ack",
+        payload,
+        timestamp: message["timestamp"] as number,
+      };
+    }
+    case "resume-confirm": {
+      const payload = parseResumeConfirmPayload(message["payload"]);
+
+      if (!payload) return undefined;
+
+      return {
+        type: "resume-confirm",
+        payload,
+        timestamp: message["timestamp"] as number,
+      };
     }
     default: {
       return undefined;

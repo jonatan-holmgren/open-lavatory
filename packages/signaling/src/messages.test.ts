@@ -77,6 +77,7 @@ describe("parseSignalMessage", () => {
         frame("capabilities", { transports: ["wrtc"], info: { name: "No identity" } }),
       ),
     ).toBeUndefined();
+
     expect(
       parseSignalMessage(
         frame("capabilities", {
@@ -84,6 +85,7 @@ describe("parseSignalMessage", () => {
           info: {
             identity: "com.example.wallet",
             name: "Example Wallet",
+            // eslint-disable-next-line unicorn/max-nested-calls
             icon: "x".repeat(10_000),
           },
         }),
@@ -124,5 +126,60 @@ describe("parseSignalMessage", () => {
     expect(
       parseSignalMessage(frame("data", { anything: true })),
     ).toMatchObject({ type: "data" });
+  });
+
+  it("parses resume and resume-ack packets", () => {
+    const payload = {
+      version: 1,
+      pairingId: "pairingresume001",
+      publicKey: "cHVibGlj",
+      challenge: "challenge",
+      counter: 42,
+    };
+
+    expect(parseSignalMessage(frame("resume", payload))).toEqual({
+      type: "resume",
+      payload,
+      timestamp: 1_750_000_000_000,
+    });
+
+    expect(
+      parseSignalMessage(frame("resume-ack", { ...payload, initiatorChallenge: "init" })),
+    ).toEqual({
+      type: "resume-ack",
+      payload: { ...payload, initiatorChallenge: "init" },
+      timestamp: 1_750_000_000_000,
+    });
+  });
+
+  it("rejects malformed resume packets", () => {
+    const base = {
+      version: 1,
+      pairingId: "pairingresume001",
+      publicKey: "cHVibGlj",
+      challenge: "challenge",
+      counter: 1,
+    };
+
+    expect(parseSignalMessage(frame("resume", { ...base, pairingId: "" }))).toBeUndefined();
+    expect(parseSignalMessage(frame("resume", { ...base, publicKey: 42 }))).toBeUndefined();
+    expect(parseSignalMessage(frame("resume", { ...base, counter: -1 }))).toBeUndefined();
+    expect(parseSignalMessage(frame("resume", { ...base, counter: 1.5 }))).toBeUndefined();
+    expect(parseSignalMessage(frame("resume", { ...base, challenge: "" }))).toBeUndefined();
+    expect(parseSignalMessage(frame("resume-ack", base))).toBeUndefined();
+    expect(parseSignalMessage(frame("resume", { ...base, counter: Number.MAX_SAFE_INTEGER + 1 }))).toBeUndefined();
+  });
+
+  it("only accepts a resume-confirm proof shaped as a SHA-256 lowercase hex digest", () => {
+    const payload = { pairingId: "pairingresume001", proof: "0123456789abcdef".repeat(4) };
+
+    expect(parseSignalMessage(frame("resume-confirm", payload))).toMatchObject({
+      type: "resume-confirm",
+      payload,
+    });
+
+    for (const proof of ["", "a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64), 42]) {
+      expect(parseSignalMessage(frame("resume-confirm", { ...payload, proof }))).toBeUndefined();
+    }
   });
 });

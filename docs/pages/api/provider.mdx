@@ -35,12 +35,13 @@ const chainId = await provider.request({ method: 'eth_chainId' })
 ## Parameters
 
 - `config?`: protocol defaults (signaling + transport)
-- `storage?`: custom storage backend (defaults to localStorage where available)
+- `storage?`: settings and saved-session backend (defaults to localStorage where available)
 - `openModal?`: optional UI hook used by connector/modal integrations
 
 ## Provider helpers
 
 - `createSession(parameters?)`
+- `restoreSession()`: restores a saved pairing; rejects if no saved pairing exists
 - `closeSession()`
 - `getAccounts()`
 - `status`
@@ -63,3 +64,11 @@ Provider emits state/session events including:
 
 - `connect`
 - `accountsChanged`
+
+## Saved sessions
+
+Settings and saved sessions use the same `storage` adapter, with separate keys. In browsers this defaults to localStorage; outside browsers, the fallback is in-memory storage. Session parameters include serialized private keys and replay counters, so scripts on the same origin can read them.
+
+Enable `autoReconnect` through `provider.storage.setSettings` to save connected sessions and counter updates. When a provider is constructed with this setting and a saved pairing, it starts restoration automatically. `restoreSession()` can also restore explicitly saved parameters.
+
+An authentication failure or a resumption timeout removes the saved pairing and exposes the reason through `provider.error`. Recovery requires a fresh pairing, not another `restoreSession()` call. Closing the session also deletes its saved parameters.

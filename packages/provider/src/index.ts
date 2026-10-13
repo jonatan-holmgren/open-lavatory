@@ -3,6 +3,7 @@ import {
   encodeConnectionURL,
   type Observable,
   observable,
+  type SessionConnectionParameters,
   type SessionLinkParameters,
 } from "@openlv/core";
 import {
@@ -11,6 +12,7 @@ import {
   SessionStatus,
 } from "@openlv/session";
 import type { PeerInfo } from "@openlv/signaling";
+import { Status as SignalStatus } from "@openlv/signaling";
 import type { TransportProtocol } from "@openlv/transport";
 import { webrtc, type WebRTCConfig } from "@openlv/transport/webrtc";
 import { Provider as OxProvider } from "ox";
@@ -87,6 +89,7 @@ export type ProviderConfig = {
 export type ProviderBase = {
   storage: ProviderStorageR;
   createSession: (parameters?: SessionLinkParameters) => Promise<Session>;
+  restoreSession: () => Promise<Session>;
   closeSession: () => Promise<void>;
   getAccounts: () => Promise<Address[]>;
   status: Observable<ProviderStatus>;
@@ -115,7 +118,10 @@ export const createProvider = (
   const [error, setError] = observable<string | undefined>(undefined);
 
   let accounts: Address[] = [];
-  const storage = createProviderStorage({ storage: parameters.storage });
+  let unsubscribeSessionStatus: (() => void) | undefined;
+  const storage = createProviderStorage({
+    storage: parameters.storage,
+  });
   const { openModal, config } = parameters;
 
   status.subscribe(current => log("status", current));
@@ -165,6 +171,10 @@ export const createProvider = (
     return p && s ? { p, s } : undefined;
   };
 
+  const persistSession = (connection: SessionConnectionParameters) => {
+    if (storage.getSettings().autoReconnect) storage.setSession(connection);
+  };
+
   const start = async (parameters?: SessionLinkParameters) => {
     setError(undefined);
     setStatus(ProviderStatus.CREATING);
@@ -191,10 +201,33 @@ export const createProvider = (
         linkParameters,
         [webrtc(transportOptions)],
         onMessage,
-        { info: config?.info },
+        {
+          info: config?.info,
+          onConnectionParametersChange: persistSession,
+        },
       );
 
       setSession(next);
+      unsubscribeSessionStatus?.();
+      unsubscribeSessionStatus = next.status.subscribe((current) => {
+        if (current !== SessionStatus.DISCONNECTED || session.get() !== next) return;
+
+        // Keep the pairing while signaling can recover a dropped transport.
+        if (next.signalStatus.get() !== SignalStatus.ERROR && next._internal.transport) return;
+
+        const reason = next.error.get();
+
+        setSession(undefined);
+        setError(reason);
+        setStatus(reason ? ProviderStatus.ERROR : ProviderStatus.STANDBY);
+
+        try {
+          storage.clearSession();
+        }
+        catch (error) {
+          log("could not delete saved session", error);
+        }
+      });
       setStatus(ProviderStatus.CONNECTING);
 
       log("session created");
@@ -223,6 +256,14 @@ export const createProvider = (
       ) as string;
 
       setStatus(ProviderStatus.CONNECTED);
+
+      try {
+        persistSession(next.getConnectionParameters());
+      }
+      catch (error) {
+        log("could not persist session", error);
+      }
+
       oxEmitter.emit("connect", { chainId: chainIdHex });
       oxEmitter.emit("accountsChanged", accounts);
 
@@ -244,6 +285,19 @@ export const createProvider = (
     setSession(undefined);
     setError(undefined);
     setStatus(ProviderStatus.STANDBY);
+    storage.clearSession();
+  };
+
+  const restoreSession = async (): Promise<Session> => {
+    const current = session.get();
+
+    if (current) return current;
+
+    const saved = storage.getSession();
+
+    if (!saved) throw new Error("No saved session to restore");
+
+    return await start(saved);
   };
 
   const request: OxProvider.from.Value<ProviderConfig>["request"] = async (
@@ -350,11 +404,23 @@ export const createProvider = (
     request,
     getAccounts,
     createSession: start,
+    restoreSession,
     closeSession,
     status,
     error,
     session,
   });
+
+  if (storage.getSettings().autoReconnect && storage.getSession()) {
+    void (async () => {
+      try {
+        await restoreSession();
+      }
+      catch (error) {
+        log("auto-restore failed", error);
+      }
+    })();
+  }
 
   return oxProvider as OpenLVProvider;
 };

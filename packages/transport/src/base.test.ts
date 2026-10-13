@@ -11,13 +11,18 @@ import type { TransportLayerBaseEmitter } from "./layer.js";
 const createFakeTransport = () => {
   let emitter: TransportLayerBaseEmitter | undefined;
   const sent: string[] = [];
+  const counts = { setup: 0, teardown: 0 };
 
   const factory = createTransportBase("fake", (parameters) => {
     emitter = parameters.emitter;
 
     return {
-      setup: async () => {},
-      teardown: async () => {},
+      setup: async () => {
+        counts.setup += 1;
+      },
+      teardown: async () => {
+        counts.teardown += 1;
+      },
       handle: async () => {},
       send: async (message) => {
         sent.push(message);
@@ -28,6 +33,7 @@ const createFakeTransport = () => {
   return {
     factory,
     sent,
+    counts,
     getEmitter: (): TransportLayerBaseEmitter => {
       if (!emitter) throw new Error("transport not created");
 
@@ -114,5 +120,28 @@ describe("createTransportBase", () => {
 
     await layer.setup();
     await expect(layer.send({ a: 1 })).rejects.toThrow("Transport not connected");
+  });
+
+  it("renegotiates by recreating the underlying connection", async () => {
+    const { encryptionKey, decryptionKey } = await generateKeyPair();
+    const { factory, counts, getEmitter } = createFakeTransport();
+
+    const layer = factory.create({
+      encrypt: encryptionKey.encrypt,
+      decrypt: decryptionKey.decrypt,
+      isHost: true,
+      onmessage: () => {},
+      subsend: async () => {},
+    });
+
+    await layer.setup();
+    getEmitter().emit("connected");
+    expect(layer.status.get()).toBe(Status.CONNECTED);
+
+    await layer.renegotiate();
+
+    expect(counts.teardown).toBe(1);
+    expect(counts.setup).toBe(2);
+    expect(layer.status.get()).toBe(Status.READY);
   });
 });

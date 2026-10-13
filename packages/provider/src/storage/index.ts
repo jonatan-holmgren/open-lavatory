@@ -1,9 +1,11 @@
+import { parseSessionConnectionParameters, type SessionConnectionParameters } from "@openlv/core";
 import { EventEmitter } from "eventemitter3";
 
 import { DEFAULT_SETTINGS } from "./default.js";
 import { parseProviderStorage, type ProviderStorage } from "./version.js";
 
 const DEFAULT_STORAGE_KEY = "@openlv/connector/settings";
+const SESSION_STORAGE_KEY = "@openlv/connector/session";
 
 export type {
   ProviderStorage,
@@ -26,6 +28,9 @@ const createPassthrough = () => {
     setItem: (key: string, value: string) => {
       map.set(key, value);
     },
+    removeItem: (key: string) => {
+      map.delete(key);
+    },
   };
 };
 
@@ -43,6 +48,9 @@ export type ProviderStorageR = {
   }>;
   getSettings: () => ProviderStorage;
   setSettings: (update: ProviderStorage) => void;
+  getSession: () => SessionConnectionParameters | undefined;
+  setSession: (parameters: SessionConnectionParameters) => void;
+  clearSession: () => void;
 };
 
 export const createProviderStorage = ({
@@ -59,6 +67,21 @@ export const createProviderStorage = ({
     settings_change: (settings: ProviderStorage) => void;
   }>();
 
+  const readSession = (): SessionConnectionParameters | undefined => {
+    const raw = io.getItem(SESSION_STORAGE_KEY);
+
+    if (!raw) return undefined;
+
+    try {
+      const parsed: unknown = JSON.parse(raw);
+
+      return parseSessionConnectionParameters(parsed);
+    }
+    catch {
+      return undefined;
+    }
+  };
+
   return {
     emitter,
     getSettings: () => settings,
@@ -66,6 +89,13 @@ export const createProviderStorage = ({
       settings = update;
       io.setItem(DEFAULT_STORAGE_KEY, JSON.stringify(update));
       emitter.emit("settings_change", update);
+    },
+    getSession: readSession,
+    setSession: (parameters: SessionConnectionParameters) => {
+      io.setItem(SESSION_STORAGE_KEY, JSON.stringify(parameters));
+    },
+    clearSession: () => {
+      io.removeItem(SESSION_STORAGE_KEY);
     },
   };
 };
