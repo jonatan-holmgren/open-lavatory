@@ -180,12 +180,16 @@ export const parseCapabilities = (raw: unknown): PeerCapabilities | undefined =>
 
   return { transports, info };
 };
-
 export type ResumePayload = Extract<
   SignalMessageResume["payload"],
   object
 >;
 
+/**
+ * Parse and shape-check a decrypted signaling payload. The relay topic is
+ * public, so decrypted JSON is still untrusted input: anything that does not
+ * match one of the four message shapes is dropped (returns undefined).
+ */
 const parseResumePayload = (raw: unknown): ResumePayload | undefined => {
   if (!isObject(raw)) return undefined;
 

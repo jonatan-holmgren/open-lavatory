@@ -88,6 +88,11 @@ export type Session = {
   };
 };
 
+/**
+ * OpenLV Session
+ *
+ * https://openlv.sh/api/session
+ */
 export const createSession = async (
   initParameters: SessionLinkParameters,
   transportLayers: TransportLayerFunction[],

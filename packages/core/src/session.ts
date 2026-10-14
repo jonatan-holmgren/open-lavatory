@@ -28,7 +28,7 @@ export type SessionHandshakeParameters = {
  * these can be used to restart a session
  */
 export type SessionConnectionParameters = SessionHandshakeParameters & {
-  // The peer public key used to encrypt messages during resumed signaling.
+  // The peer public key used to encrypt messages during signaling.
   relyingPublicKey: string;
   // Our serialized public key.
   encryptionKey: string;
@@ -36,7 +36,7 @@ export type SessionConnectionParameters = SessionHandshakeParameters & {
   decryptionKey: string;
   // Durable pairing identity.
   pairingId: string;
-  // Transport negotiated before persistence; both peers reuse it on resume.
+  // Transport negotiated before persistence.
   transportId: string;
   // Locally sent resume/ack high-water mark.
   lastCounter: number;
