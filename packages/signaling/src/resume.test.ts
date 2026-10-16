@@ -365,4 +365,48 @@ describe("bootstrap messages after pairing", () => {
       await Promise.all([host.teardown(), client.teardown(), resumed.layer.teardown()]);
     }
   });
+
+  it("a pinned peer ignores capabilities frames after it has resumed", async () => {
+    const topic = createTopic();
+    const keys = await createSessionKeys();
+    const host = await createPairedPeer({ channel: topic.channel(), keys, isHost: true, initiate: true });
+    const clientChannel = topic.channel();
+    const clientPublished: string[] = [];
+    const capturingClientChannel: SignalingChannel = {
+      ...clientChannel,
+      publish: (payload) => {
+        clientPublished.push(payload);
+        clientChannel.publish(payload);
+      },
+    };
+    const client = await createPairedPeer({ channel: capturingClientChannel, keys, isHost: false, initiate: true });
+
+    try {
+      await Promise.all([host.layer.setup(), client.layer.setup()]);
+
+      const encrypted = Promise.all([
+        waitForState(host.layer, Status.ENCRYPTED),
+        waitForState(client.layer, Status.ENCRYPTED),
+      ]);
+
+      await Promise.all([host.layer.resume(), client.layer.resume()]);
+      await encrypted;
+
+      const publishedBefore = clientPublished.length;
+      const capabilities = JSON.stringify({
+        type: "capabilities", payload: { transports: ["wrtc"] }, timestamp: Date.now(),
+      });
+
+      clientChannel.publish(`xc${await keys.clientKeys.encryptionKey.encrypt(capabilities)}`);
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+
+      expect(clientPublished).toHaveLength(publishedBefore);
+      expect(client.layer.status.get()).toBe(Status.ENCRYPTED);
+    }
+    finally {
+      await Promise.all([host.layer.teardown(), client.layer.teardown()]);
+    }
+  });
 });

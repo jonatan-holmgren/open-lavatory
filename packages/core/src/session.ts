@@ -1,5 +1,5 @@
 import { OPENLV_PROTOCOL_VERSION } from "./url/index.js";
-import { isObject, isReplayCounter } from "./validation.js";
+import { isNonEmptyString, isObject, isReplayCounter } from "./validation.js";
 
 // typescript type for 32 character hex string
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -61,35 +61,63 @@ export const parseSessionConnectionParameters = (
 ): SessionConnectionParameters | undefined => {
   if (!isObject(value)) return undefined;
 
-  const record = value;
+  if (value["version"] !== OPENLV_PROTOCOL_VERSION) return undefined;
 
-  const stringFields = [
-    "sessionId",
-    "h",
-    "k",
-    "p",
-    "s",
-    "relyingPublicKey",
-    "encryptionKey",
-    "decryptionKey",
-    "pairingId",
-    "transportId",
-  ] as const;
-  const counterFields = [
-    "lastCounter",
-    "lastSeenCounter",
-    "lastSeenAckCounter",
-  ] as const;
+  const {
+    sessionId,
+    h,
+    k,
+    p,
+    s,
+    relyingPublicKey,
+    encryptionKey,
+    decryptionKey,
+    pairingId,
+    transportId,
+    lastCounter,
+    lastSeenCounter,
+    lastSeenAckCounter,
+  } = value;
 
   if (
-    record["version"] !== OPENLV_PROTOCOL_VERSION
-    || stringFields.some(field => typeof record[field] !== "string" || record[field].length === 0)
-    || (record["pairingId"] as string).length > 64
-    || (record["transportId"] as string).length > 32
-    || counterFields.some(field => !isReplayCounter(record[field]))
+    !isNonEmptyString(sessionId)
+    || !isNonEmptyString(h)
+    || !isNonEmptyString(k)
+    || !isNonEmptyString(p)
+    || !isNonEmptyString(s)
+    || !isNonEmptyString(relyingPublicKey)
+    || !isNonEmptyString(encryptionKey)
+    || !isNonEmptyString(decryptionKey)
+    || !isNonEmptyString(pairingId)
+    || !isNonEmptyString(transportId)
   ) {
     return undefined;
   }
 
-  return record as unknown as SessionConnectionParameters;
+  if (pairingId.length > 64 || transportId.length > 32) return undefined;
+
+  if (
+    !isReplayCounter(lastCounter)
+    || !isReplayCounter(lastSeenCounter)
+    || !isReplayCounter(lastSeenAckCounter)
+  ) {
+    return undefined;
+  }
+
+  return {
+    version: OPENLV_PROTOCOL_VERSION,
+    sessionId,
+    h,
+    k,
+    p,
+    s,
+    relyingPublicKey,
+    encryptionKey,
+    decryptionKey,
+    pairingId,
+    transportId,
+    lastCounter,
+    lastSeenCounter,
+    lastSeenAckCounter,
+  };
 };

@@ -214,6 +214,17 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
   };
 
   const handleEncryptedFrame = async (message: SignalMessage) => {
+    // Once a saved pairing pins the peer key, bootstrap frames must not be able
+    // to bypass authenticated resumption.
+    if (
+      expectedPeerKey
+      && (message.type === "pubkey" || message.type === "capabilities")
+    ) {
+      log("Ignoring bootstrap frame for pinned pairing", message.type);
+
+      return;
+    }
+
     await match({ msg: message, status: status.get(), isHost })
       // Host: client responded with its public key.
       .with(

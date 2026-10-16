@@ -160,8 +160,8 @@ export const createSession = async (
   const isResuming = savedConnection !== undefined;
   let selectedTransportId = savedConnection?.transportId;
   const persistResumeState = (state: SignalingResumeState) => {
+    options?.onConnectionParametersChange?.(buildConnectionParameters(state));
     resumeState = state;
-    options?.onConnectionParametersChange?.(connectionParameters());
   };
 
   const [status, setStatus] = observable<SessionStatus>(SessionStatus.CREATED);
@@ -215,7 +215,9 @@ export const createSession = async (
   signal.peerCapabilities.subscribe(received => setPeerInfo(received?.info));
 
   let transport: TransportLayer | undefined;
-  const connectionParameters = (): SessionConnectionParameters => {
+  const buildConnectionParameters = (
+    state: SignalingResumeState,
+  ): SessionConnectionParameters => {
     const relyingPublicKey = signal.peerKey.get() ?? relyingEncryptionKey;
 
     if (!relyingPublicKey) {
@@ -236,10 +238,13 @@ export const createSession = async (
       relyingPublicKey: relyingPublicKey.toString(),
       encryptionKey: encryptionKey.toString(),
       decryptionKey: decryptionKey.toString(),
-      ...resumeState,
+      ...state,
       transportId: selectedTransportId,
     };
   };
+
+  const connectionParameters = (): SessionConnectionParameters =>
+    buildConnectionParameters(resumeState);
 
   // Bound resumed setup immediately, but allow fresh hosts to advertise until a peer joins.
   const TRANSPORT_LINK_TIMEOUT_MS = 45_000;

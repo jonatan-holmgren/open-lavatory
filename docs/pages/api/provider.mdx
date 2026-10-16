@@ -41,7 +41,7 @@ const chainId = await provider.request({ method: 'eth_chainId' })
 ## Provider helpers
 
 - `createSession(parameters?)`
-- `restoreSession()`: restores a saved pairing; rejects if no saved pairing exists
+- `restoreSession()`: returns the current session if one exists; otherwise restores a saved pairing, rejecting if none is saved
 - `closeSession()`
 - `getAccounts()`
 - `status`

@@ -315,6 +315,8 @@ describe("Session", () => {
       await resumed.status.until(current => current === SessionStatus.DISCONNECTED);
 
       expect(resumed.error.get()).toContain(persistenceError.message);
+      // A failed write must not advance the counters reported locally.
+      expect(resumed.getConnectionParameters()).toEqual(saved);
       await expect(resumed.send({ method: "eth_chainId" })).rejects.toThrow("Session not ready");
       await expect(resumed._internal.signal.resume()).rejects.toThrow();
     }

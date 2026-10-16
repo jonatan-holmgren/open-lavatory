@@ -19,6 +19,6 @@ Restore durable replay counters for authenticated session resumption.
 - Saved pairing/transport identifiers reject empty and oversized values; confirmation proofs require 64 lowercase hex characters
 - Core exports shared object and replay-counter type guards used by saved-state validation, signaling payload parsing, and the resume controller
 - Signaling uses the existing Noble hex encoder for transcript proofs; resume tests share role-aware peer and attacker fixtures instead of duplicating setup
-- Session API types and status definitions are colocated with `createSession`; the separate types module is removed
+- Session API types and status definitions are colocated with `createSession`
 - Concurrent provider restores share completion through account and chain readiness, including synchronous status-subscriber reentry and account requests during automatic restoration
 - Counters for existing saved pairings persist before frame publication even when automatic reconnection is disabled; new unsaved pairings remain unsaved
