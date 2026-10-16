@@ -4,7 +4,7 @@ import { webrtc } from "@openlv/transport/webrtc";
 import { describe, expect, test, vi } from "vitest";
 
 import type * as DynamicModule from "./dynamic.js";
-import { connectSession, createSession, SessionStatus } from "./index.js";
+import { connectSession, createSession, type Session, SessionStatus } from "./index.js";
 
 const { createChannel } = vi.hoisted(() => {
   const subscribersByTopic = new Map<string, Set<(payload: string) => void>>();
@@ -37,6 +37,7 @@ const { createChannel } = vi.hoisted(() => {
 });
 
 const createMemorySignaling = async ({ topic }: { topic: string; }) => {
+  // Keep signaling loading within the mocked dynamic-loader boundary.
   const { createSignalingLayer } = await import("@openlv/signaling");
 
   return createSignalingLayer(createChannel(topic));
@@ -164,6 +165,43 @@ describe("Session", () => {
 
     await expect(sessionA.send({ method: "eth_chainId" }))
       .rejects.toThrow("Session not ready");
+  });
+
+  test("Keeps advertising until a peer joins and completes a fresh handshake", async () => {
+    const host = await createSession(
+      { p: "memory", s: "memory://relay" },
+      [webrtc()],
+      async () => ({ result: "host" }),
+    );
+    let client: Session | undefined;
+
+    vi.useFakeTimers();
+
+    try {
+      await host.connect();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(host.status.get()).toBe(SessionStatus.READY);
+      expect(host.error.get()).toBeUndefined();
+      vi.useRealTimers();
+
+      client = await connectSession(
+        encodeConnectionURL(host.getHandshakeParameters()),
+        async () => ({ result: "client" }),
+        [webrtc()],
+      );
+
+      await client.connect();
+      await Promise.all([host, client].map(
+        session => session.status.until(current => current === SessionStatus.CONNECTED),
+      ));
+
+      await expect(host.send({ method: "eth_chainId" })).resolves.toEqual({ result: "client" });
+    }
+    finally {
+      await Promise.all([host.close(), client?.close()]);
+      vi.useRealTimers();
+    }
   });
 
   test("Should resume when only the host restarts", async () => {

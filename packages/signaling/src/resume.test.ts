@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { Status } from "./index.js";
 import type { SignalingChannel } from "./protocol.js";
 import {
+  createControlledChannel,
   createPairedPeer,
   createPeer,
   createSessionKeys,
@@ -12,6 +13,24 @@ import {
   PAIRING_ID,
   waitForState,
 } from "./resume.fixtures.js";
+
+const createFreshPair = async () => {
+  const keys = await createSessionKeys();
+  const hostChannel = createControlledChannel();
+  const clientChannel = createControlledChannel();
+  const { layer: host } = await createPairedPeer({ channel: hostChannel.channel, keys, isHost: true, initiate: false, isFresh: true });
+  const { layer: client } = await createPairedPeer({ channel: clientChannel.channel, keys, isHost: false, initiate: false, isFresh: true });
+
+  await host.setup();
+  await client.setup();
+  await hostChannel.receive(clientChannel.published[0]!);
+  await clientChannel.receive(hostChannel.published[0]!);
+  await hostChannel.receive(clientChannel.published[1]!);
+  await clientChannel.receive(hostChannel.published[1]!);
+  await hostChannel.receive(clientChannel.published[2]!);
+
+  return { host, client, hostChannel, clientChannel, keys };
+};
 
 describe("signaling resume (in-memory relay)", () => {
   it("resumes sequential subscriptions when the first peer's request is lost", async () => {
@@ -225,5 +244,125 @@ describe("signaling resume (in-memory relay)", () => {
     await expect(reloadedResponder.layer.send({ message: "blocked" })).rejects.toThrow(/failed|error/i);
 
     await Promise.all([reloadedResponder.layer.teardown(), initiator.layer.teardown()]);
+  });
+});
+
+it("an unpinned host accepts a second scan after the first scanner leaves", async () => {
+  const keys = await createSessionKeys();
+  const clientKeys = await generateKeyPair();
+  const hostChannel = createControlledChannel();
+  const firstChannel = createControlledChannel();
+  const clientChannel = createControlledChannel();
+  const { layer: host } = await createPairedPeer({ channel: hostChannel.channel, keys, isHost: true, initiate: false, isFresh: true });
+  const { layer: first } = await createPairedPeer({ channel: firstChannel.channel, keys, isHost: false, initiate: false, isFresh: true });
+  const { layer: client } = await createPairedPeer({ channel: clientChannel.channel, keys: { ...keys, clientKeys }, isHost: false, initiate: false, isFresh: true });
+  const received: object[] = [];
+
+  client.on("message", (message) => {
+    received.push(message);
+  });
+
+  try {
+    await host.setup();
+    await first.setup();
+    await hostChannel.receive(firstChannel.published[0]!);
+    await first.teardown();
+    hostChannel.published.pop();
+    expect(host.peerKey.get()).toBeUndefined();
+    await client.setup();
+
+    while (hostChannel.published.length > 0 || clientChannel.published.length > 0) {
+      for (const frame of clientChannel.published) await hostChannel.receive(frame);
+
+      clientChannel.published.length = 0;
+
+      for (const frame of hostChannel.published) await clientChannel.receive(frame);
+
+      hostChannel.published.length = 0;
+    }
+
+    expect(host.status.get()).toBe(Status.ENCRYPTED);
+    expect(client.status.get()).toBe(Status.ENCRYPTED);
+    expect(host.peerKey.get()?.toString()).toBe(clientKeys.encryptionKey.toString());
+    await host.send({ request: "rescanned" });
+    await clientChannel.receive(hostChannel.published.at(-1)!);
+    expect(received).toEqual([{ request: "rescanned" }]);
+  }
+  finally {
+    await Promise.all([host.teardown(), first.teardown(), client.teardown()]);
+  }
+});
+
+describe("bootstrap messages after pairing", () => {
+  it("an old bootstrap URI cannot replace a learned peer pin", async () => {
+    const { host, client, hostChannel, clientChannel, keys } = await createFreshPair();
+    const attacker = await generateKeyPair();
+    const received: object[] = [];
+
+    client.on("message", (message) => {
+      received.push(message);
+    });
+
+    try {
+      await hostChannel.receive(clientChannel.published[0]!);
+      const substitutedKey = JSON.stringify({
+        type: "pubkey", payload: { publicKey: attacker.encryptionKey.toString() }, timestamp: Date.now(),
+      });
+      const capabilities = JSON.stringify({
+        type: "capabilities", payload: { transports: ["wrtc"] }, timestamp: Date.now(),
+      });
+
+      await hostChannel.receive(`xh${await keys.hostKeys.encryptionKey.encrypt(substitutedKey)}`);
+      await hostChannel.receive(`xh${await keys.hostKeys.encryptionKey.encrypt(capabilities)}`);
+
+      expect(host.peerKey.get()?.toString()).toBe(keys.clientKeys.encryptionKey.toString());
+      expect(host.status.get()).toBe(Status.ENCRYPTED);
+      await host.send({ request: "still paired" });
+      await clientChannel.receive(hostChannel.published.at(-1)!);
+      expect(received).toEqual([{ request: "still paired" }]);
+    }
+    finally {
+      await Promise.all([host.teardown(), client.teardown()]);
+    }
+  });
+
+  it("duplicate bootstrap messages do not restart an established client", async () => {
+    const { host, client, hostChannel, clientChannel, keys } = await createFreshPair();
+    const states: string[] = [];
+
+    client.status.subscribe((state) => {
+      states.push(state);
+    });
+
+    try {
+      await clientChannel.receive(hostChannel.published[0]!);
+      await clientChannel.receive(hostChannel.published[1]!);
+
+      expect(states).toEqual([Status.ENCRYPTED]);
+      expect(client.peerKey.get()?.toString()).toBe(keys.hostKeys.encryptionKey.toString());
+    }
+    finally {
+      await Promise.all([host.teardown(), client.teardown()]);
+    }
+  });
+
+  it("a restored client cannot complete resume using recorded bootstrap traffic", async () => {
+    const { host, client, hostChannel, keys } = await createFreshPair();
+    const resumedChannel = createControlledChannel();
+    const resumed = await createPairedPeer({ channel: resumedChannel.channel, keys, isHost: false, initiate: true });
+
+    try {
+      await resumed.layer.setup();
+      await resumed.layer.resume();
+      await resumedChannel.receive(hostChannel.published[0]!);
+      await resumedChannel.receive(hostChannel.published[1]!);
+
+      expect(resumed.layer.status.get()).toBe(Status.HANDSHAKE_PARTIAL);
+      expect(resumed.layer.peerKey.get()).toBeUndefined();
+      await expect(resumed.layer.send({ request: "must not send" })).rejects.toThrow();
+    }
+    finally {
+      await Promise.all([host.teardown(), client.teardown(), resumed.layer.teardown()]);
+    }
   });
 });

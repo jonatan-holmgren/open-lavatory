@@ -59,6 +59,7 @@ type PeerParameters = {
   initiate: boolean;
   state?: SignalingResumeState;
   persist?: (state: SignalingResumeState) => void;
+  isFresh?: boolean;
 };
 
 const createPeer = async (parameters: PeerParameters) => {
@@ -83,7 +84,7 @@ const createPeer = async (parameters: PeerParameters) => {
     },
     decrypt: message => parameters.decryptionKey.decrypt(message),
     capabilities: { transports: ["wrtc"] },
-    expectedPeerKey: parameters.pinnedKey,
+    expectedPeerKey: parameters.isFresh ? undefined : parameters.pinnedKey,
     resume: {
       ...resumeState,
       initiate: parameters.initiate,
@@ -131,10 +132,10 @@ const establishFresh = async (
   keys: SessionKeys,
 ) => {
   const host = await createPairedPeer({
-    channel: topic.channel(), keys, isHost: true, initiate: false,
+    channel: topic.channel(), keys, isHost: true, initiate: false, isFresh: true,
   });
   const client = await createPairedPeer({
-    channel: topic.channel(), keys, isHost: false, initiate: false,
+    channel: topic.channel(), keys, isHost: false, initiate: false, isFresh: true,
   });
 
   await host.layer.setup();
@@ -151,8 +152,8 @@ const establishFresh = async (
 };
 
 const createPairedPeer = ({
-  channel, keys, isHost, initiate, persist,
-}: Pick<PeerParameters, "channel" | "isHost" | "initiate" | "persist"> & {
+  channel, keys, isHost, initiate, persist, isFresh,
+}: Pick<PeerParameters, "channel" | "isHost" | "initiate" | "persist" | "isFresh"> & {
   keys: SessionKeys;
 }) => {
   const local = isHost ? keys.hostKeys : keys.clientKeys;
@@ -168,6 +169,7 @@ const createPairedPeer = ({
     pairingId: PAIRING_ID,
     initiate,
     persist,
+    isFresh,
   });
 };
 

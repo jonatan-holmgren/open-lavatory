@@ -109,6 +109,21 @@ export const createSession = async (
     if (problem) throw new Error(`Invalid session info: ${problem}`);
   }
 
+  const savedConnection = parseSessionConnectionParameters(initParameters);
+  const hasConnectionMaterial
+    = "encryptionKey" in initParameters
+      || "decryptionKey" in initParameters
+      || "relyingPublicKey" in initParameters
+      || "pairingId" in initParameters
+      || "transportId" in initParameters
+      || "lastCounter" in initParameters
+      || "lastSeenCounter" in initParameters
+      || "lastSeenAckCounter" in initParameters;
+
+  if (hasConnectionMaterial && !savedConnection) {
+    throw new Error("Invalid saved session. Request a fresh pairing URI and try again.");
+  }
+
   const emitter = new EventEmitter<SessionEvents>();
   const messages = new EventEmitter<CorrelationEvents>();
   const sessionId
@@ -136,7 +151,6 @@ export const createSession = async (
     ...(options?.info && { info: options.info }),
   };
 
-  const savedConnection = parseSessionConnectionParameters(initParameters);
   let resumeState: SignalingResumeState = {
     pairingId: savedConnection?.pairingId ?? sessionId,
     lastCounter: savedConnection?.lastCounter ?? 0,
@@ -227,21 +241,22 @@ export const createSession = async (
     };
   };
 
-  // Authenticated peers must not remain in LINKING indefinitely.
+  // Bound resumed setup immediately, but allow fresh hosts to advertise until a peer joins.
   const TRANSPORT_LINK_TIMEOUT_MS = 45_000;
   let linkDeadline: ReturnType<typeof setTimeout> | undefined;
   let unsubscribeTransportStatus: (() => void) | undefined;
   let unsubscribeSignalStatus: (() => void) | undefined;
   let isStopped = false;
   let teardownPromise: Promise<void> | undefined;
+  let rejectPendingConnect: ((error: Error) => void) | undefined;
   const teardown = () => {
     if (teardownPromise) return teardownPromise;
 
     isStopped = true;
     clearLinkDeadline();
+    rejectPendingConnect?.(new Error(lastError.get() ?? "Session closed"));
     signal.off("message", onSignalMessage);
     signal.off("resume", onSignalResume);
-    signal.off("restart", onSignalRestart);
     signal.off("error", onSignalError);
     unsubscribeSignalStatus?.();
     unsubscribeSignalStatus = undefined;
@@ -297,13 +312,22 @@ export const createSession = async (
     linkDeadline ??= setTimeout(() => {
       if (status.get() === SessionStatus.CONNECTED) return;
 
-      log("transport failed to connect in time");
-      setLastErrorIfUnset("Timed out establishing the peer-to-peer connection");
+      if (isResuming) {
+        log("session resumption failed to complete in time");
+        setLastErrorIfUnset("Session resumption timed out. Request a fresh pairing URI and try again.");
+      }
+      else {
+        log("transport failed to connect in time");
+        setLastErrorIfUnset("Timed out establishing the peer-to-peer connection");
+      }
+
       void teardown();
     }, TRANSPORT_LINK_TIMEOUT_MS);
   };
 
   const onTransportSetupError = (error: unknown) => {
+    if (isStopped) return;
+
     log("transport setup failed", error);
     clearLinkDeadline();
     setLastErrorIfUnset(error instanceof Error ? error.message : "Transport setup failed");
@@ -392,26 +416,6 @@ export const createSession = async (
     }
   };
 
-  const onSignalRestart = async () => {
-    if (isStopped) return;
-
-    try {
-      clearLinkDeadline();
-      unsubscribeTransportStatus?.();
-      unsubscribeTransportStatus = undefined;
-      const closingTransport = transport;
-
-      // Detach before teardown yields; ENCRYPTED may install its replacement.
-      transport = undefined;
-      closingTransport?.emitter.off("error", onTransportError);
-      setPeerInfo(undefined);
-      await closingTransport?.teardown();
-    }
-    catch (error) {
-      onTransportSetupError(error);
-    }
-  };
-
   const onSignalError = (reason: string) => setLastError(reason);
 
   const onSignalMessage = async (message: object) => {
@@ -463,22 +467,42 @@ export const createSession = async (
 
       signal.on("message", onSignalMessage);
       signal.on("resume", onSignalResume);
-      signal.on("restart", onSignalRestart);
       signal.on("error", onSignalError);
       unsubscribeSignalStatus = signal.status.subscribe(onSignalStateChange);
 
-      try {
-        await signal.setup();
+      // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+      const ended = new Promise<never>((_resolve, reject) => {
+        rejectPendingConnect = reject;
+      });
 
-        if (isResuming && !isStopped) {
-          await signal.resume();
-        }
+      if (isResuming) armLinkDeadline();
+
+      try {
+        await Promise.race([
+          (async () => {
+            await signal.setup();
+
+            if (isStopped) {
+              await signal.teardown();
+
+              return;
+            }
+
+            if (isResuming) {
+              await signal.resume();
+            }
+          })(),
+          ended,
+        ]);
       }
       catch (error) {
         setLastErrorIfUnset(error instanceof Error ? error.message : "Signaling setup failed");
-        await teardown();
+        void teardown();
 
         throw error;
+      }
+      finally {
+        rejectPendingConnect = undefined;
       }
     },
     async close() {

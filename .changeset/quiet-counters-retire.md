@@ -10,12 +10,15 @@
 Restore durable replay counters for authenticated session resumption.
 
 - Signaling: `resume` and `resume-ack` carry a monotonic counter; persisted high-water marks survive restart and bind the authenticated proof
+- Signaling ignores bootstrap messages once a peer key is pinned; old pairing URIs and recorded capabilities cannot bypass authenticated resumption, while unpinned hosts still accept interrupted-scan retries
 - Session: saved sessions include the negotiated transport so resumed peers select the same transport without re-exchanging capabilities; an inbound `close` tears down the whole session
 - Provider: saved session keys and counters use the existing `storage` adapter alongside settings, defaulting to localStorage in browsers; no separate session-storage adapter is required
-- Core: persisted session parameters validate the replay counters and selected transport
-- Resumption failures and 45-second deadlines terminate the pairing, surface a re-pairing error, and invalidate provider-saved state; counter persistence failures abort sending
+- Core: persisted session parameters validate the replay counters and selected transport; malformed or incomplete saved state is rejected before signaling instead of starting a fresh handshake with restored keys
+- Resumption failures and 45-second deadlines terminate the pairing, surface a re-pairing error, and invalidate provider-saved state; the deadline starts before signaling setup and subscription, and counter persistence failures abort sending
 - Transport construction and session lifecycle stay inside `createSession`, without a hook wrapper or circular transport getter; the request/reply sequence lives in the existing messages module
 - Saved pairing/transport identifiers reject empty and oversized values; confirmation proofs require 64 lowercase hex characters
 - Core exports shared object and replay-counter type guards used by saved-state validation, signaling payload parsing, and the resume controller
 - Signaling uses the existing Noble hex encoder for transcript proofs; resume tests share role-aware peer and attacker fixtures instead of duplicating setup
 - Session API types and status definitions are colocated with `createSession`; the separate types module is removed
+- Concurrent provider restores share completion through account and chain readiness, including synchronous status-subscriber reentry and account requests during automatic restoration
+- Counters for existing saved pairings persist before frame publication even when automatic reconnection is disabled; new unsaved pairings remain unsaved

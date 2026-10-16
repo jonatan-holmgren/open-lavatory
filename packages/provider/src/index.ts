@@ -119,6 +119,7 @@ export const createProvider = (
 
   let accounts: Address[] = [];
   let unsubscribeSessionStatus: (() => void) | undefined;
+  let restoringSession: Promise<Session> | undefined;
   const storage = createProviderStorage({
     storage: parameters.storage,
   });
@@ -172,7 +173,12 @@ export const createProvider = (
   };
 
   const persistSession = (connection: SessionConnectionParameters) => {
-    if (storage.getSettings().autoReconnect) storage.setSession(connection);
+    if (
+      storage.getSettings().autoReconnect
+      || storage.getSession()?.pairingId === connection.pairingId
+    ) {
+      storage.setSession(connection);
+    }
   };
 
   const start = async (parameters?: SessionLinkParameters) => {
@@ -209,8 +215,8 @@ export const createProvider = (
 
       setSession(next);
       unsubscribeSessionStatus?.();
-      unsubscribeSessionStatus = next.status.subscribe((current) => {
-        if (current !== SessionStatus.DISCONNECTED || session.get() !== next) return;
+      const onSessionStatusChange = () => {
+        if (next.status.get() !== SessionStatus.DISCONNECTED || session.get() !== next) return;
 
         // Keep the pairing while signaling can recover a dropped transport.
         if (next.signalStatus.get() !== SignalStatus.ERROR && next._internal.transport) return;
@@ -227,7 +233,14 @@ export const createProvider = (
         catch (error) {
           log("could not delete saved session", error);
         }
-      });
+      };
+      const unsubscribeStatus = next.status.subscribe(onSessionStatusChange);
+      const unsubscribeSignalStatus = next.signalStatus.subscribe(onSessionStatusChange);
+
+      unsubscribeSessionStatus = () => {
+        unsubscribeStatus();
+        unsubscribeSignalStatus();
+      };
       setStatus(ProviderStatus.CONNECTING);
 
       log("session created");
@@ -289,6 +302,8 @@ export const createProvider = (
   };
 
   const restoreSession = async (): Promise<Session> => {
+    if (restoringSession) return await restoringSession;
+
     const current = session.get();
 
     if (current) return current;
@@ -297,7 +312,21 @@ export const createProvider = (
 
     if (!saved) throw new Error("No saved session to restore");
 
-    return await start(saved);
+    const pending = (async () => {
+      // Assign restoringSession before start notifies synchronous subscribers.
+      await Promise.resolve();
+
+      return await start(saved);
+    })();
+
+    restoringSession = pending;
+
+    try {
+      return await pending;
+    }
+    finally {
+      if (restoringSession === pending) restoringSession = undefined;
+    }
   };
 
   const request: OxProvider.from.Value<ProviderConfig>["request"] = async (
@@ -336,6 +365,12 @@ export const createProvider = (
         .with({ method: "eth_requestAccounts" }, async () => {
           log("eth_requestAccounts");
 
+          if (restoringSession) {
+            await restoringSession;
+
+            return await getAccounts();
+          }
+
           let provider: OpenLVProvider | undefined;
 
           if (oxProvider) {
@@ -372,6 +407,8 @@ export const createProvider = (
         })
         .with({ method: "eth_accounts" }, async () => {
           log("eth_accounts");
+
+          if (restoringSession) await restoringSession;
 
           return await getAccounts();
         })

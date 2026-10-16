@@ -34,9 +34,6 @@ export type SignalEventMap = {
   // Emitted once an inbound or outbound resume has completed, so consumers
   // can tear down and renegotiate the transport.
   resume: () => void;
-  // Emitted when a restarting peer re-runs the fresh handshake against us, so
-  // consumers can tear down the old transport before the new one is built.
-  restart: () => void;
 };
 
 export type SignalingHooks = {
@@ -174,32 +171,16 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
     timestamp: Date.now(),
   });
 
-  /**
-   * A peer that restarts from the same URI re-runs the fresh handshake. An
-   * already-encrypted peer must accept that and rebuild, otherwise a single
-   * restart would leave both peers stalled on a dead transport.
-   */
-  const restartHandshake = () => {
-    setPeerKey(undefined);
-    setPeerCapabilities(undefined);
-    emitter.emit("restart");
-  };
-
   const handleHandshakeFrame = async (message: SignalMessage) => {
+    if (expectedPeerKey || resumeController?.initiate || peerKey.get()) return;
+
     await match({ msg: message, status: status.get(), isHost })
-      .with({ msg: { type: "flash" }, status: Status.READY, isHost: true }, async () => {
-        setStatus(Status.HANDSHAKE);
-        await send("handshake", pubkeyMessage());
-      })
       .with({ msg: { type: "flash" }, isHost: true }, async () => {
-        restartHandshake();
         setStatus(Status.HANDSHAKE);
         await send("handshake", pubkeyMessage());
       })
-      // A restarting host re-sends its pubkey. Accept it from any non-READY
-      // state so a client that is still ENCRYPTED can restart the handshake.
       .with(
-        { msg: { type: "pubkey" }, isHost: false },
+        { msg: { type: "pubkey" }, isHost: false, status: Status.HANDSHAKE },
         async ({ msg: { payload: messagePayload } }) => {
           let receivedKey: EncryptionKey;
 
@@ -211,12 +192,6 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
 
               return;
             }
-
-            if (expectedPeerKey && receivedKey.toString() !== expectedPeerKey.toString()) {
-              fail("Received host public key does not match saved pairing; pair again");
-
-              return;
-            }
           }
           catch {
             fail("Failed to parse received host public key; pair again");
@@ -224,11 +199,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
             return;
           }
 
-          if (isStopped) return;
-
-          if (status.get() === Status.ENCRYPTED) {
-            restartHandshake();
-          }
+          if (isStopped || status.get() !== Status.HANDSHAKE) return;
 
           if (!setPeerKey(receivedKey)) return;
 
@@ -259,7 +230,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
             return;
           }
 
-          if (isStopped) return;
+          if (isStopped || status.get() !== Status.HANDSHAKE) return;
 
           if (expectedPeerKey && receivedKey.toString() !== expectedPeerKey.toString()) {
             fail("Received client public key does not match saved pairing; pair again");
@@ -277,6 +248,8 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
       .with(
         { msg: { type: "capabilities" }, status: Status.HANDSHAKE_PARTIAL },
         async ({ msg: { payload: messagePayload } }) => {
+          if (!peerKey.get()) return;
+
           setPeerCapabilities(messagePayload);
           setStatus(Status.ENCRYPTED);
 

@@ -42,13 +42,15 @@ const createMemoryStorage = (): Storage => {
   };
 };
 
-const createPeerSession = (connectError?: string) => {
+const createPeerSession = (connectError?: string, hasSignalingError = true) => {
   const [status, setStatus] = observable<SessionStatus>(SessionStatus.CREATED);
   const [error, setError] = observable<string | undefined>(undefined);
   const [signalStatus, setSignalStatus] = observable<SignalStatus>(SignalStatus.READY);
   const fail = (reason: string) => {
     setError(reason);
-    setSignalStatus(SignalStatus.ERROR);
+
+    if (hasSignalingError) setSignalStatus(SignalStatus.ERROR);
+
     setStatus(SessionStatus.DISCONNECTED);
   };
   const session: Partial<Session> = {
@@ -66,8 +68,74 @@ const createPeerSession = (connectError?: string) => {
     }),
   };
 
-  return { session: session as Session, fail };
+  return { session: session as Session, fail, disconnect: () => setStatus(SessionStatus.DISCONNECTED) };
 };
+
+describe("provider saved pairing counters", () => {
+  test("explicit restores persist connection updates with auto reconnect disabled", async () => {
+    const provider = createProvider({ storage: createMemoryStorage() });
+    const peer = createPeerSession();
+    const updated = { ...parameters, lastCounter: 1 };
+
+    provider.storage.setSession(parameters);
+    vi.mocked(createSession).mockResolvedValueOnce(peer.session);
+    await provider.restoreSession();
+    vi.mocked(createSession).mock.lastCall?.[3]?.onConnectionParametersChange?.(updated);
+
+    expect(provider.storage.getSettings().autoReconnect).toBe(false);
+    expect(provider.storage.getSession()).toEqual(updated);
+  });
+
+  test.each([false, true])(
+    "disabled auto reconnect leaves unrelated saved state unchanged (saved pairing: %s)",
+    async (hasSavedPairing) => {
+      const provider = createProvider({ storage: createMemoryStorage() });
+      const peer = createPeerSession();
+      const saved = hasSavedPairing
+        ? { ...parameters, pairingId: "different-pairing" }
+        : undefined;
+
+      if (saved) provider.storage.setSession(saved);
+
+      vi.mocked(createSession).mockResolvedValueOnce(peer.session);
+      await provider.createSession(parameters);
+      vi.mocked(createSession).mock.lastCall?.[3]?.onConnectionParametersChange?.({
+        ...parameters,
+        lastCounter: 1,
+      });
+
+      expect(provider.storage.getSession()).toEqual(saved);
+    },
+  );
+
+  test.each(["read", "write"] as const)(
+    "saved pairing storage %s failures propagate from connection updates",
+    async (operation) => {
+      const io = createMemoryStorage();
+      const provider = createProvider({ storage: io });
+      const peer = createPeerSession();
+      const failure = new Error(`storage ${operation} failed`);
+
+      provider.storage.setSession(parameters);
+      vi.mocked(createSession).mockResolvedValueOnce(peer.session);
+      await provider.restoreSession();
+      const update = vi.mocked(createSession).mock.lastCall?.[3]?.onConnectionParametersChange;
+
+      if (operation === "read") {
+        vi.spyOn(io, "getItem").mockImplementation(() => {
+          throw failure;
+        });
+      }
+      else {
+        vi.spyOn(io, "setItem").mockImplementation(() => {
+          throw failure;
+        });
+      }
+
+      expect(() => update?.({ ...parameters, lastCounter: 1 })).toThrow(failure);
+    },
+  );
+});
 
 describe("provider saved pairing failures", () => {
   test("a rejected restore deletes the pairing and cannot return a failed session on retry", async () => {
@@ -108,4 +176,145 @@ describe("provider saved pairing failures", () => {
     expect(provider.storage.getSession()).toBeUndefined();
     await expect(provider.restoreSession()).rejects.toThrow("No saved session to restore");
   });
+});
+
+test("an authentication failure invalidates a pairing after its transport disconnects", async () => {
+  const peer = createPeerSession();
+  const provider = createProvider({ storage: createMemoryStorage() });
+
+  peer.session._internal = { transport: {} } as Session["_internal"];
+  provider.storage.setSession(parameters);
+  vi.mocked(createSession).mockResolvedValueOnce(peer.session);
+  await provider.restoreSession();
+  peer.disconnect();
+  expect(provider.storage.getSession()).toEqual(parameters);
+
+  const reason = "Resume failed: invalid proof";
+
+  peer.fail(reason);
+  expect(provider.error.get()).toBe(reason);
+  expect(provider.session.get()).toBeUndefined();
+  expect(provider.storage.getSession()).toBeUndefined();
+});
+
+test("a resume deadline invalidates saved state without a signaling error", async () => {
+  const reason = "Session resumption timed out";
+  const peer = createPeerSession(reason, false);
+  const provider = createProvider({ storage: createMemoryStorage() });
+
+  peer.session._internal = { transport: undefined } as Session["_internal"];
+  provider.storage.setSession(parameters);
+  vi.mocked(createSession).mockResolvedValueOnce(peer.session);
+  await expect(provider.restoreSession()).rejects.toThrow(reason);
+
+  expect(provider.error.get()).toBe(reason);
+  expect(provider.session.get()).toBeUndefined();
+  expect(provider.storage.getSession()).toBeUndefined();
+});
+
+test("concurrent restore and account callers await account and chain readiness", async () => {
+  const io = createMemoryStorage();
+  const saved = createProvider({ storage: io });
+
+  saved.storage.setSession(parameters);
+  saved.storage.setSettings({ ...saved.storage.getSettings(), autoReconnect: true });
+  const peer = createPeerSession();
+  let releaseAccounts!: (response: { result: string[]; }) => void;
+  let releaseChain!: (response: { result: string; }) => void;
+  let requestedAccounts!: () => void;
+  let requestedChain!: () => void;
+  // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+  const accountsRequested = new Promise<void>((resolve) => {
+    requestedAccounts = resolve;
+  });
+  // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+  const chainRequested = new Promise<void>((resolve) => {
+    requestedChain = resolve;
+  });
+
+  peer.session.send = vi.fn(peer.session.send)
+    .mockImplementationOnce(() => {
+      requestedAccounts();
+
+      // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+      return new Promise((resolve) => {
+        releaseAccounts = resolve;
+      });
+    })
+    .mockImplementationOnce(() => {
+      requestedChain();
+
+      // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+      return new Promise((resolve) => {
+        releaseChain = resolve;
+      });
+    });
+  vi.mocked(createSession).mockClear()
+    .mockResolvedValueOnce(peer.session);
+
+  const provider = createProvider({ storage: io });
+  const connected = vi.fn();
+  const accountsChanged = vi.fn();
+
+  provider.on("connect", connected);
+  provider.on("accountsChanged", accountsChanged);
+  let isSettled = false;
+  const restoration = (async () => {
+    const session = await provider.restoreSession();
+
+    isSettled = true;
+
+    return session;
+  })();
+  const otherRestoration = provider.restoreSession();
+  const accounts = provider.request({ method: "eth_requestAccounts" });
+  const existingAccounts = provider.request({ method: "eth_accounts" });
+
+  await accountsRequested;
+  expect(provider.status.get()).toBe(ProviderStatus.CONNECTING);
+  expect(isSettled).toBe(false);
+  releaseAccounts({ result: ["0x1234"] });
+  await chainRequested;
+  expect(provider.status.get()).toBe(ProviderStatus.CONNECTING);
+  expect(isSettled).toBe(false);
+  expect(connected).not.toHaveBeenCalled();
+  expect(accountsChanged).not.toHaveBeenCalled();
+  releaseChain({ result: "0x2a" });
+
+  await expect(Promise.all([restoration, otherRestoration, accounts, existingAccounts])).resolves.toEqual([
+    peer.session, peer.session, ["0x1234"], ["0x1234"],
+  ]);
+  expect(provider.status.get()).toBe(ProviderStatus.CONNECTED);
+  expect(connected).toHaveBeenCalledExactlyOnceWith({ chainId: "0x2a" });
+  expect(accountsChanged).toHaveBeenCalledExactlyOnceWith(["0x1234"]);
+});
+
+test("a synchronous CREATING subscriber joins the existing restoration", async () => {
+  const provider = createProvider({ storage: createMemoryStorage() });
+  const connected = vi.fn();
+  let hasReentered = false;
+  let reentrant: Promise<Session> | undefined;
+
+  provider.storage.setSession(parameters);
+  provider.on("connect", connected);
+  vi.mocked(createSession).mockImplementation(async () => createPeerSession().session);
+  const unsubscribe = provider.status.subscribe((status) => {
+    if (hasReentered || status !== ProviderStatus.CREATING) return;
+
+    hasReentered = true;
+    reentrant = provider.restoreSession();
+  });
+
+  try {
+    const restored = await provider.restoreSession();
+
+    expect(hasReentered).toBe(true);
+    await expect(reentrant).resolves.toBe(restored);
+    expect(provider.session.get()).toBe(restored);
+    expect(connected).toHaveBeenCalledOnce();
+  }
+  finally {
+    unsubscribe();
+    vi.mocked(createSession).mockReset();
+  }
 });
