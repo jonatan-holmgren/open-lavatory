@@ -137,8 +137,8 @@ test("dApp and wallet link over at least one public relay", async ({ browser }) 
 
       // Signaling handshake must complete on both peers.
       await Promise.all([
-        dappLog.waitFor(/signal state change encrypted/, 15_000),
-        walletLog.waitFor(/signal state change encrypted/, 15_000),
+        dappLog.waitFor(/session state .*signal: encrypted/, 15_000),
+        walletLog.waitFor(/session state .*signal: encrypted/, 15_000),
       ]);
 
       // Transport negotiation must flow through encrypted signaling.
@@ -153,8 +153,8 @@ test("dApp and wallet link over at least one public relay", async ({ browser }) 
 
       if (candidates > 0) {
         await Promise.all([
-          dappLog.waitFor(/updateStatus connected/, 30_000),
-          walletLog.waitFor(/updateStatus connected/, 30_000),
+          dappLog.waitFor(/session state .*status: connected/, 30_000),
+          walletLog.waitFor(/session state .*status: connected/, 30_000),
         ]);
       }
 
