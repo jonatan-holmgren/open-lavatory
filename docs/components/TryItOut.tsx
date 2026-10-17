@@ -47,7 +47,6 @@ const config = createConfig({
           icon: "https://openlv.sh/openlavatory.png",
         },
       },
-      // Per-tab saved sessions (sessionStorage), not durable localStorage.
       sessionStorage: globalThis.sessionStorage,
     }),
   ],

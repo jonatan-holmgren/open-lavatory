@@ -77,8 +77,6 @@ const nextLogId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36)
     .slice(2, 8)}`;
 
-// A peer can close the session cleanly; only a disconnect with an error is a
-// failure. Transport loss with a live transport is recoverable via signaling.
 const sessionToPhase = (
   status: SessionStatus,
   hasError: boolean,
