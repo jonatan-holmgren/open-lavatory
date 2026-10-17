@@ -1,5 +1,6 @@
 import { decodeConnectionURL, encodeConnectionURL } from "@openlv/core";
 import { generateSessionId } from "@openlv/core/encryption";
+import type { TransportLayerFunction } from "@openlv/transport";
 import { webrtc } from "@openlv/transport/webrtc";
 import { describe, expect, test, vi } from "vitest";
 
@@ -52,7 +53,10 @@ vi.mock("./dynamic.js", async (importOriginal) => {
   };
 });
 
-const createConnectedPair = async (sessionId: string) => {
+const createConnectedPair = async (
+  sessionId: string,
+  clientTransport: TransportLayerFunction = webrtc(),
+) => {
   const sessionA = await createSession(
     { sessionId, p: "memory", s: "memory://relay" },
     [webrtc()],
@@ -66,7 +70,7 @@ const createConnectedPair = async (sessionId: string) => {
   const sessionB = await connectSession(
     encodedUrl,
     async () => ({ result: "client" }),
-    [webrtc()],
+    [clientTransport],
   );
 
   await sessionB.connect();
@@ -157,14 +161,122 @@ describe("Session", () => {
     await Promise.all([resumedA.close(), resumedB.close()]);
   });
 
-  test("Stops after receiving close", async () => {
-    const { sessionA, sessionB } = await createConnectedPair("peerclosetest001");
+  test("Buffers renegotiation frames that arrive before the resumed transport is ready", async () => {
+    const { sessionA, sessionB } = await createConnectedPair("resumebuffer0001");
+
+    const savedA = sessionA.getConnectionParameters();
+    const savedB = sessionB.getConnectionParameters();
+
+    await Promise.all([sessionA.close(), sessionB.close()]);
+
+    let releaseSetup!: () => void;
+    let markOfferRelayed!: () => void;
+    // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+    const setupGate = new Promise<void>((resolve) => {
+      releaseSetup = resolve;
+    });
+    // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+    const offerRelayed = new Promise<void>((resolve) => {
+      markOfferRelayed = resolve;
+    });
+    const baseClientTransport = webrtc();
+    const gatedWebrtc: TransportLayerFunction = {
+      ...baseClientTransport,
+      create(parameters) {
+        const layer = baseClientTransport.create(parameters);
+
+        return {
+          ...layer,
+          setup: async () => {
+            await setupGate;
+            await layer.setup();
+          },
+        };
+      },
+    };
+    const baseHostTransport = webrtc();
+    const observedWebrtc: TransportLayerFunction = {
+      ...baseHostTransport,
+      create(parameters) {
+        return baseHostTransport.create({
+          ...parameters,
+          async subsend(message) {
+            await parameters.subsend(message);
+
+            if (message.type === "offer") markOfferRelayed();
+          },
+        });
+      },
+    };
+
+    const resumedA = await createSession(
+      savedA,
+      [observedWebrtc],
+      async () => ({ result: "host" }),
+    );
+    const resumedB = await createSession(savedB, [gatedWebrtc], async () => ({ result: "client" }));
+
+    await resumedA.connect();
+    await resumedB.connect();
+
+    await offerRelayed;
+    releaseSetup();
+
+    await Promise.all([resumedA, resumedB].map(
+      session => session.status.until(current => current === SessionStatus.CONNECTED),
+    ));
+
+    await expect(resumedA.send({ method: "eth_chainId" })).resolves.toEqual({ result: "client" });
+    await Promise.all([resumedA.close(), resumedB.close()]);
+  });
+
+  test("Local cleanup preserves the peer pairing for a later resume", async () => {
+    const { sessionA, sessionB } = await createConnectedPair(generateSessionId());
+    const saved = sessionB.getConnectionParameters();
+
+    await sessionB.close({ notifyPeer: false });
+    expect(sessionB.status.get()).toBe(SessionStatus.DISCONNECTED);
+    expect(sessionA.status.get()).toBe(SessionStatus.CONNECTED);
+
+    const resumed = await createSession(saved, [webrtc()], async () => ({ result: "restarted" }));
+
+    try {
+      await resumed.connect();
+      await resumed.status.until(status => status === SessionStatus.CONNECTED);
+      await expect(sessionA.send({ method: "eth_chainId" })).resolves.toEqual({ result: "restarted" });
+    }
+    finally {
+      await Promise.all([sessionA.close(), resumed.close()]);
+    }
+  });
+
+  test("Delivers graceful close before tearing down the transport", async () => {
+    const baseTransport = webrtc();
+    const deferredSendTransport: TransportLayerFunction = {
+      ...baseTransport,
+      create(parameters) {
+        const transport = baseTransport.create(parameters);
+
+        return {
+          ...transport,
+          async send(message) {
+            queueMicrotask(() => {
+              queueMicrotask(() => {
+                void transport.send(message).catch(() => {});
+              });
+            });
+          },
+        };
+      },
+    };
+    const { sessionA, sessionB } = await createConnectedPair(
+      "peerclosetest001",
+      deferredSendTransport,
+    );
 
     await sessionB.close();
     await sessionA.status.until(current => current === SessionStatus.DISCONNECTED);
-
-    await expect(sessionA.send({ method: "eth_chainId" }))
-      .rejects.toThrow("Session not ready");
+    expect(sessionA.error.get()).toBeUndefined();
   });
 
   test("Keeps advertising until a peer joins and completes a fresh handshake", async () => {

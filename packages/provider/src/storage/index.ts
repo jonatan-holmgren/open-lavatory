@@ -18,6 +18,9 @@ export type {
 export type ProviderStorageParameters = {
   // Defaults to localStorage
   storage?: Storage;
+  // Saved-session backend; defaults to `storage` so the dApp tab and the
+  // wallet tab of the same browser can pass per-tab isolation here.
+  sessionStorage?: Storage;
 };
 
 const createPassthrough = () => {
@@ -55,8 +58,11 @@ export type ProviderStorageR = {
 
 export const createProviderStorage = ({
   storage,
+  sessionStorage,
 }: ProviderStorageParameters): ProviderStorageR => {
   const io = storage ?? getStorage() ?? createPassthrough();
+  // Settings and sessions may live in different backends (per-tab sessions).
+  const sessionIo = sessionStorage ?? io;
   const initialSettings = io.getItem(DEFAULT_STORAGE_KEY);
 
   let settings: ProviderStorage = initialSettings
@@ -68,7 +74,7 @@ export const createProviderStorage = ({
   }>();
 
   const readSession = (): SessionConnectionParameters | undefined => {
-    const raw = io.getItem(SESSION_STORAGE_KEY);
+    const raw = sessionIo.getItem(SESSION_STORAGE_KEY);
 
     if (!raw) return undefined;
 
@@ -92,10 +98,10 @@ export const createProviderStorage = ({
     },
     getSession: readSession,
     setSession: (parameters: SessionConnectionParameters) => {
-      io.setItem(SESSION_STORAGE_KEY, JSON.stringify(parameters));
+      sessionIo.setItem(SESSION_STORAGE_KEY, JSON.stringify(parameters));
     },
     clearSession: () => {
-      io.removeItem(SESSION_STORAGE_KEY);
+      sessionIo.removeItem(SESSION_STORAGE_KEY);
     },
   };
 };

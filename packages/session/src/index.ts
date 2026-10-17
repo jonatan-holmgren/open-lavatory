@@ -57,6 +57,8 @@ export const SessionStatus = {
 } as const;
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
 
+const CLOSE_ACK_TIMEOUT_MS = 2000;
+
 export type SessionOptions = {
   info?: PeerInfo;
   /** Called synchronously before a resumed counter is sent. */
@@ -78,11 +80,14 @@ export type Session = {
   getHandshakeParameters(): SessionHandshakeParameters;
   getConnectionParameters(): SessionConnectionParameters;
   connect(): Promise<void>;
-  close(): Promise<void>;
+  /** Close the pairing, or release local resources without unpairing the peer. */
+  close(options?: { notifyPeer?: boolean; }): Promise<void>;
   send(message: object, ackTimeout?: number, responseTimeout?: number): Promise<unknown>;
   emitter: EventEmitter<SessionEvents>;
   _internal: {
     signal: SignalingLayer;
+    /** True when signaling or resume deadlines make the saved pairing unusable. */
+    isPairingInvalidated: boolean;
     /** Instantiated when signaling reaches ENCRYPTED and a transport is selected. */
     transport: TransportLayer | undefined;
   };
@@ -166,6 +171,7 @@ export const createSession = async (
 
   const [status, setStatus] = observable<SessionStatus>(SessionStatus.CREATED);
   const [lastError, setLastError] = observable<string | undefined>(undefined);
+  let isPairingInvalidated = false;
   const [peerInfo, setPeerInfo] = observable<PeerInfo | undefined>(undefined);
 
   const setLastErrorIfUnset = (reason: string) => {
@@ -215,6 +221,63 @@ export const createSession = async (
   signal.peerCapabilities.subscribe(received => setPeerInfo(received?.info));
 
   let transport: TransportLayer | undefined;
+  const sendClose = async (current: TransportLayer) => {
+    const messageId = crypto.randomUUID();
+
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        messages.off("message", onMessage);
+        messages.off("ended", onEnded);
+      };
+      const onMessage = (message: SessionMessageAck | SessionMessageResponse) => {
+        if (message.type !== "ack" || message.messageId !== messageId) return;
+
+        cleanup();
+        resolve();
+      };
+      const onEnded = (reason: string) => {
+        cleanup();
+        reject(new Error(reason));
+      };
+
+      messages.on("message", onMessage);
+      messages.on("ended", onEnded);
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Peer did not acknowledge session close"));
+      }, CLOSE_ACK_TIMEOUT_MS);
+
+      void current.send({
+        type: "close",
+        messageId,
+      } satisfies SessionMessage).catch((error: unknown) => {
+        cleanup();
+        reject(error);
+      });
+    });
+  };
+  // The peer can start renegotiating as soon as it observes our resume, which
+  // can be before this side has finished building its transport. Buffer those
+  // negotiation frames instead of dropping them so the offer is not lost.
+  let pendingNegotiation: TransportMessage[] = [];
+  let isTransportReady = false;
+  const flushPendingNegotiation = async () => {
+    if (!transport || !isTransportReady || pendingNegotiation.length === 0) return;
+
+    const buffered = pendingNegotiation;
+
+    pendingNegotiation = [];
+
+    for (const message of buffered) {
+      try {
+        await transport.handle(message);
+      }
+      catch (error) {
+        log("failed to handle buffered negotiation message", error);
+      }
+    }
+  };
   const buildConnectionParameters = (
     state: SignalingResumeState,
   ): SessionConnectionParameters => {
@@ -270,6 +333,8 @@ export const createSession = async (
     const closingTransport = transport;
 
     transport = undefined;
+    isTransportReady = false;
+    pendingNegotiation = [];
     closingTransport?.emitter.off("error", onTransportError);
     teardownPromise = (async () => {
       try {
@@ -319,6 +384,7 @@ export const createSession = async (
 
       if (isResuming) {
         log("session resumption failed to complete in time");
+        isPairingInvalidated = true;
         setLastErrorIfUnset("Session resumption timed out. Request a fresh pairing URI and try again.");
       }
       else {
@@ -370,15 +436,29 @@ export const createSession = async (
       async onmessage(message) {
         if (isStopped) return;
 
+        const current = transport;
+
+        if (!current) return;
+
         try {
           if (message.type === "close") {
+            try {
+              await current.send({
+                type: "ack",
+                messageId: message.messageId,
+              } satisfies SessionMessage);
+            }
+            catch (error) {
+              log("failed to acknowledge close to peer", error);
+            }
+
             await teardown();
 
             return;
           }
 
-          if (transport && message.type === "request") {
-            await respondToRequest(message as SessionMessageRequest, transport, onMessage, emitter);
+          if (message.type === "request") {
+            await respondToRequest(message as SessionMessageRequest, current, onMessage, emitter);
           }
           else if (message.type === "response" || message.type === "ack") {
             messages.emit("message", message as SessionMessageAck | SessionMessageResponse);
@@ -400,6 +480,8 @@ export const createSession = async (
     unsubscribeTransportStatus = transport.status.subscribe(onTransportStateChange);
     armLinkDeadline();
     await transport.setup();
+    isTransportReady = true;
+    await flushPendingNegotiation();
   };
 
   const onSignalResume = async () => {
@@ -410,7 +492,10 @@ export const createSession = async (
 
       if (transport) {
         armLinkDeadline();
+        isTransportReady = false;
         await transport.renegotiate();
+        isTransportReady = true;
+        await flushPendingNegotiation();
       }
       else {
         await startTransport();
@@ -421,7 +506,10 @@ export const createSession = async (
     }
   };
 
-  const onSignalError = (reason: string) => setLastError(reason);
+  const onSignalError = (reason: string, shouldInvalidatePairing = false) => {
+    isPairingInvalidated ||= shouldInvalidatePairing;
+    setLastError(reason);
+  };
 
   const onSignalMessage = async (message: object) => {
     if (isStopped) return;
@@ -432,10 +520,16 @@ export const createSession = async (
       messages.emit("message", sessionMessage);
     }
     else if (sessionMessage.type === "request") {
-      if (!transport) return;
+      const negotiationMessage = sessionMessage.payload as TransportMessage;
+
+      if (!transport || !isTransportReady) {
+        pendingNegotiation.push(negotiationMessage);
+
+        return;
+      }
 
       try {
-        await transport.handle(sessionMessage.payload as TransportMessage);
+        await transport.handle(negotiationMessage);
       }
       catch (error) {
         log("failed to handle negotiation message", error);
@@ -510,9 +604,9 @@ export const createSession = async (
         rejectPendingConnect = undefined;
       }
     },
-    async close() {
+    async close({ notifyPeer = true } = {}) {
       try {
-        await transport?.send({ type: "close" } satisfies SessionMessage);
+        if (notifyPeer && transport) await sendClose(transport);
       }
       catch (error) {
         log("failed to send close to peer", error);
@@ -557,6 +651,9 @@ export const createSession = async (
     },
     _internal: {
       signal,
+      get isPairingInvalidated() {
+        return isPairingInvalidated;
+      },
       get transport() {
         return transport;
       },

@@ -30,7 +30,7 @@ export type Status = (typeof Status)[keyof typeof Status];
 
 export type SignalEventMap = {
   message: (message: object) => void;
-  error: (reason: string) => void;
+  error: (reason: string, isPairingInvalidated?: boolean) => void;
   // Emitted once an inbound or outbound resume has completed, so consumers
   // can tear down and renegotiate the transport.
   resume: () => void;
@@ -105,7 +105,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
   const emitter = new EventEmitter<SignalEventMap>();
   let isStopped = false;
 
-  const fail = (reason: string) => {
+  const fail = (reason: string, isPairingInvalidated = false) => {
     if (isStopped || status.get() === Status.ERROR) return;
 
     isStopped = true;
@@ -113,7 +113,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
     setPeerKey(undefined);
     setPeerCapabilities(undefined);
     log(reason);
-    emitter.emit("error", reason);
+    emitter.emit("error", reason, isPairingInvalidated);
     setStatus(Status.ERROR);
   };
 
@@ -188,13 +188,13 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
             receivedKey = await parseEncryptionKey(messagePayload.publicKey);
 
             if (!await validatePublicKeyHash(receivedKey, h)) {
-              fail("Received host public key does not match expected hash; pair again");
+              fail("Received host public key does not match expected hash; pair again", true);
 
               return;
             }
           }
           catch {
-            fail("Failed to parse received host public key; pair again");
+            fail("Failed to parse received host public key; pair again", true);
 
             return;
           }
@@ -236,7 +236,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
             receivedKey = await parseEncryptionKey(messagePayload.publicKey);
           }
           catch {
-            fail("Failed to parse received client public key; pair again");
+            fail("Failed to parse received client public key; pair again", true);
 
             return;
           }
@@ -244,7 +244,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
           if (isStopped || status.get() !== Status.HANDSHAKE) return;
 
           if (expectedPeerKey && receivedKey.toString() !== expectedPeerKey.toString()) {
-            fail("Received client public key does not match saved pairing; pair again");
+            fail("Received client public key does not match saved pairing; pair again", true);
 
             return;
           }
@@ -315,7 +315,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
       log("Dropping frame with unknown prefix");
     }
     catch (error) {
-      if (!isStopped) fail(`Signaling authentication failed: ${error instanceof Error ? error.message : String(error)}; pair again`);
+      if (!isStopped) fail(`Signaling authentication failed: ${error instanceof Error ? error.message : String(error)}; pair again`, true);
     }
   };
 

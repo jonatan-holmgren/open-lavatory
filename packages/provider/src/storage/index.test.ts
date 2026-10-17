@@ -91,6 +91,37 @@ describe("provider session storage", () => {
     }
   });
 
+  test("persists sessions to sessionStorage when it differs from settings storage", () => {
+    const settings = createMemoryStorage();
+    const sessions = createMemoryStorage();
+    const storage = createProviderStorage({
+      storage: settings,
+      sessionStorage: sessions,
+    });
+
+    storage.setSettings({ ...storage.getSettings(), autoReconnect: true });
+    storage.setSession(parameters);
+
+    // Sessions never leak into the settings backend or the other way round,
+    // so a dApp tab and a wallet tab of the same browser stay isolated.
+    expect(sessions.getItem(SESSION_STORAGE_KEY)).not.toBeNull();
+    expect(settings.getItem(SESSION_STORAGE_KEY)).toBeNull();
+
+    const restored = createProviderStorage({
+      storage: settings,
+      sessionStorage: sessions,
+    });
+
+    expect(restored.getSession()).toEqual(parameters);
+    expect(restored.getSettings().autoReconnect).toBe(true);
+
+    restored.clearSession();
+    expect(createProviderStorage({
+      storage: settings,
+      sessionStorage: sessions,
+    }).getSession()).toBeUndefined();
+  });
+
   test("ignores malformed saved session parameters", () => {
     const memory = createMemoryStorage();
     const storage = createProviderStorage({ storage: memory });

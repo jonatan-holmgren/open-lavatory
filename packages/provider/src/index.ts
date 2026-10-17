@@ -1,4 +1,4 @@
-
+/* eslint-disable max-lines -- Provider lifecycle invariants stay beside their state owner. */
 import {
   encodeConnectionURL,
   type Observable,
@@ -6,13 +6,8 @@ import {
   type SessionConnectionParameters,
   type SessionLinkParameters,
 } from "@openlv/core";
-import {
-  createSession,
-  type Session,
-  SessionStatus,
-} from "@openlv/session";
-import type { PeerInfo } from "@openlv/signaling";
-import { Status as SignalStatus } from "@openlv/signaling";
+import { createSession, type Session, SessionStatus } from "@openlv/session";
+import { type PeerInfo, Status as SignalStatus } from "@openlv/signaling";
 import type { TransportProtocol } from "@openlv/transport";
 import { webrtc, type WebRTCConfig } from "@openlv/transport/webrtc";
 import { Provider as OxProvider } from "ox";
@@ -70,7 +65,7 @@ export type OpenLVProviderParameters = Prettify<
   {
     config?: OpenLVProviderConfig;
     openModal?: (provider: OpenLVProvider) => Promise<void>;
-  } & Pick<ProviderStorageParameters, "storage">
+  } & Pick<ProviderStorageParameters, "storage" | "sessionStorage">
 >;
 
 export const ProviderStatus = {
@@ -117,30 +112,55 @@ export const createProvider = (
   const [status, setStatus] = observable<ProviderStatus>(ProviderStatus.STANDBY);
   const [error, setError] = observable<string | undefined>(undefined);
 
-  let accounts: Address[] = [];
+  let generation = 0;
   let unsubscribeSessionStatus: (() => void) | undefined;
   let restoringSession: Promise<Session> | undefined;
   const storage = createProviderStorage({
     storage: parameters.storage,
+    sessionStorage: parameters.sessionStorage,
   });
   const { openModal, config } = parameters;
 
   status.subscribe(current => log("status", current));
 
-  /**
-   * Called when the remote peer (wallet) sends a request to the dApp.
-   *
-   * In the normal EIP-1193 flow the dApp is always the requester, so this
-   * path is unusual. We emit a `request` event on the session (once the
-   * session is available) so the modal or other UI consumers can react.
-   * For any method we have no built-in handler for, we return a JSON-RPC
-   * "Method not found" error so the wallet receives a proper response rather
-   * than a no-op stub.
-   */
-  const onMessage = async (message: object): Promise<object> => {
+  const assertCurrent = (operation: number) => {
+    if (operation !== generation) throw new Error("Session start canceled");
+  };
+
+  /** Subscribers may synchronously close or start another session. */
+  const canResetSession = (operation: number, reason?: string): boolean => {
+    if (operation !== generation) return false;
+
+    unsubscribeSessionStatus?.();
+    unsubscribeSessionStatus = undefined;
+    setSession(undefined);
+
+    if (operation !== generation) return false;
+
+    setError(reason);
+
+    if (operation !== generation) return false;
+
+    setStatus(reason ? ProviderStatus.ERROR : ProviderStatus.STANDBY);
+
+    return operation === generation;
+  };
+
+  const clearSavedSession = () => {
+    try {
+      storage.clearSession();
+    }
+    catch (error) {
+      log("could not delete saved session", error);
+    }
+  };
+
+  // dApps do not serve wallet RPC; emit inbound requests for observers, then
+  // reject unknown methods with a JSON-RPC response.
+  const onMessage = async (message: object, operation: number): Promise<object> => {
+    assertCurrent(operation);
     log("onMessage received from remote peer", message);
 
-    // Emit on the session emitter so observers (e.g. modal) can react.
     session.get()?.emitter.emit("request", message);
 
     return {
@@ -181,18 +201,17 @@ export const createProvider = (
     }
   };
 
-  const start = async (parameters?: SessionLinkParameters) => {
+  const start = async (parameters?: SessionLinkParameters, operation = ++generation) => {
+    assertCurrent(operation);
     setError(undefined);
+    assertCurrent(operation);
     setStatus(ProviderStatus.CREATING);
+    assertCurrent(operation);
     const linkParameters = parameters ?? defaultLinkParameters();
 
-    if (!linkParameters) {
-      throw new Error("No link parameters provided and no signaling defaults configured");
-    }
+    if (!linkParameters) throw new Error("No link parameters provided and no signaling defaults configured");
 
-    // Stored user settings win over constructor config; both fall back to the
-    // transport's built-in defaults, so an empty list must stay undefined
-    // rather than become an empty iceServers array.
+    // Keep defaults for an empty ICE list; saved settings override config.
     const stored = storage.getSettings().transport?.s?.webrtc;
     const iceServers = [
       ...stored?.stun?.map(urls => ({ urls })) ?? [],
@@ -201,38 +220,51 @@ export const createProvider = (
     const transportOptions = iceServers.length > 0
       ? { iceServers }
       : config?.transport?.s?.webrtc;
+    let startedSession: Session | undefined;
 
     try {
       const next = await createSession(
         linkParameters,
         [webrtc(transportOptions)],
-        onMessage,
+        message => onMessage(message, operation),
         {
           info: config?.info,
-          onConnectionParametersChange: persistSession,
+          onConnectionParametersChange: (connection) => {
+            if (operation === generation && (!startedSession || session.get() === startedSession)) {
+              persistSession(connection);
+            }
+          },
         },
       );
 
+      startedSession = next;
+      assertCurrent(operation);
+
       setSession(next);
+      assertCurrent(operation);
       unsubscribeSessionStatus?.();
       const onSessionStatusChange = () => {
-        if (next.status.get() !== SessionStatus.DISCONNECTED || session.get() !== next) return;
+        if (operation !== generation || session.get() !== next) return;
+
+        if (next.status.get() !== SessionStatus.DISCONNECTED) return;
 
         // Keep the pairing while signaling can recover a dropped transport.
         if (next.signalStatus.get() !== SignalStatus.ERROR && next._internal.transport) return;
 
         const reason = next.error.get();
 
-        setSession(undefined);
-        setError(reason);
-        setStatus(reason ? ProviderStatus.ERROR : ProviderStatus.STANDBY);
+        if (!canResetSession(operation, reason)) return;
 
-        try {
-          storage.clearSession();
-        }
-        catch (error) {
-          log("could not delete saved session", error);
-        }
+        if (!reason || next._internal.isPairingInvalidated) clearSavedSession();
+
+        if (operation !== generation) return;
+
+        const disconnectError = new OxProvider.ProviderRpcError(
+          4900,
+          reason ?? "Session closed by peer",
+        );
+
+        oxEmitter.emit("disconnect", disconnectError);
       };
       const unsubscribeStatus = next.status.subscribe(onSessionStatusChange);
       const unsubscribeSignalStatus = next.signalStatus.subscribe(onSessionStatusChange);
@@ -242,33 +274,37 @@ export const createProvider = (
         unsubscribeSignalStatus();
       };
       setStatus(ProviderStatus.CONNECTING);
-
-      log("session created");
+      assertCurrent(operation);
       await next.connect();
+      assertCurrent(operation);
       log("session connected");
-      const handshakeParameters = next.getHandshakeParameters();
-      const url = encodeConnectionURL(handshakeParameters);
-
-      log("session url", url);
+      log("session url", encodeConnectionURL(next.getHandshakeParameters()));
 
       const settled = await next.status.until(
         state => state === SessionStatus.CONNECTED
           || state === SessionStatus.DISCONNECTED,
       );
 
+      assertCurrent(operation);
+
       if (settled !== SessionStatus.CONNECTED) {
         throw new Error(next.error.get() ?? "Session failed to connect");
       }
 
-      log("session linked");
+      const accounts = unwrapSessionResponse(
+        await next.send({ method: "eth_accounts", params: [] }),
+      ) as Address[];
 
-      accounts = await getAccounts();
+      assertCurrent(operation);
 
       const chainIdHex = unwrapSessionResponse(
         await next.send({ method: "eth_chainId", params: [] }),
       ) as string;
 
+      assertCurrent(operation);
+
       setStatus(ProviderStatus.CONNECTED);
+      assertCurrent(operation);
 
       try {
         persistSession(next.getConnectionParameters());
@@ -277,28 +313,47 @@ export const createProvider = (
         log("could not persist session", error);
       }
 
+      assertCurrent(operation);
       oxEmitter.emit("connect", { chainId: chainIdHex });
+      assertCurrent(operation);
       oxEmitter.emit("accountsChanged", accounts);
+      assertCurrent(operation);
 
       return next;
     }
     catch (error_) {
-      // Surface the failure to UI consumers (e.g. the modal) instead of
-      // leaving the provider stuck in "connecting".
-      setError(
-        session.get()?.error.get()
-        ?? (error_ instanceof Error ? error_.message : "Connection failed"),
-      );
-      setStatus(ProviderStatus.ERROR);
+      const reason = startedSession?.error.get()
+        ?? (error_ instanceof Error ? error_.message : "Connection failed");
+
+      // Retry readiness probes with the latest counters, never a half-ready session.
+      if (canResetSession(operation, reason)) {
+        generation++;
+
+        if (startedSession?._internal.isPairingInvalidated) clearSavedSession();
+      }
+
+      try {
+        await startedSession?.close({ notifyPeer: false });
+      }
+      catch (error) {
+        log("could not tear down failed session", error);
+      }
+
       throw error_;
     }
   };
   const closeSession = async () => {
-    await session.get()?.close();
-    setSession(undefined);
-    setError(undefined);
-    setStatus(ProviderStatus.STANDBY);
-    storage.clearSession();
+    const current = session.get();
+    const operation = ++generation;
+
+    restoringSession = undefined;
+
+    try {
+      if (canResetSession(operation)) storage.clearSession();
+    }
+    finally {
+      await current?.close();
+    }
   };
 
   const restoreSession = async (): Promise<Session> => {
@@ -312,11 +367,13 @@ export const createProvider = (
 
     if (!saved) throw new Error("No saved session to restore");
 
+    const operation = ++generation;
+
     const pending = (async () => {
       // Assign restoringSession before start notifies synchronous subscribers.
       await Promise.resolve();
 
-      return await start(saved);
+      return await start(saved, operation);
     })();
 
     restoringSession = pending;
@@ -359,8 +416,6 @@ export const createProvider = (
         })
         .with({ method: "wallet_revokePermissions" }, async () => {
           await closeSession();
-
-          return;
         })
         .with({ method: "eth_requestAccounts" }, async () => {
           log("eth_requestAccounts");
@@ -371,13 +426,9 @@ export const createProvider = (
             return await getAccounts();
           }
 
-          let provider: OpenLVProvider | undefined;
+          const provider = oxProvider as OpenLVProvider;
 
-          if (oxProvider) {
-            provider = oxProvider as OpenLVProvider;
-          }
-
-          if (openModal && provider) {
+          if (openModal) {
             await openModal(provider);
 
             await new Promise<void>((resolve) => {
@@ -390,12 +441,12 @@ export const createProvider = (
                 resolve();
               };
               const cleanup = () => {
-                provider?.off("connect", onConnect);
-                provider?.off("disconnect", onDisconnect);
+                provider.off("connect", onConnect);
+                provider.off("disconnect", onDisconnect);
               };
 
-              provider?.on("connect", onConnect);
-              provider?.on("disconnect", onDisconnect);
+              provider.on("connect", onConnect);
+              provider.on("disconnect", onDisconnect);
             });
 
             return await getAccounts();

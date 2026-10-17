@@ -8,6 +8,7 @@ import type {
   SignalMessageResumeAck,
   SignalMessageResumeConfirm,
 } from "./messages.js";
+import { log } from "./utils/log.js";
 
 const RESUME_CHALLENGE_LENGTH = 16;
 const RESUME_TIMEOUT_MS = 45_000;
@@ -51,7 +52,7 @@ export type ResumeControllerHooks = {
   getPeerKey: () => EncryptionKey | undefined;
   acceptPeerKey: (key: EncryptionKey) => void;
   onResumed: () => void;
-  onFailure: (reason: string) => void;
+  onFailure: (reason: string, isPairingInvalidated: boolean) => void;
   send: (
     message:
       | SignalMessageResume
@@ -158,12 +159,12 @@ export const createResumeController = (
     clearResponder();
   };
 
-  const fail = (reason: string) => {
+  const fail = (reason: string, isPairingInvalidated = false) => {
     if (isStopped) return;
 
     failureReason = `${reason}; re-pair through a fresh openlv:// URI`;
     teardown();
-    onFailure(failureReason);
+    onFailure(failureReason, isPairingInvalidated);
   };
 
   const persist = (next: SignalingResumeState): void => {
@@ -183,7 +184,7 @@ export const createResumeController = (
 
   const nextCounter = (): number | undefined => {
     if (!isReplayCounter(state.lastCounter) || state.lastCounter === Number.MAX_SAFE_INTEGER) {
-      fail("Resume counter cannot safely advance");
+      fail("Resume counter cannot safely advance", true);
 
       return undefined;
     }
@@ -226,7 +227,7 @@ export const createResumeController = (
     persist({ ...state, lastCounter: counter });
     const challenge = generateUrlSafeRandomString(RESUME_CHALLENGE_LENGTH);
 
-    const timer = setTimeout(() => fail("Authenticated resume timed out"), RESUME_TIMEOUT_MS);
+    const timer = setTimeout(() => fail("Authenticated resume timed out", true), RESUME_TIMEOUT_MS);
 
     pendingInitiator = {
       challenge,
@@ -253,13 +254,13 @@ export const createResumeController = (
     const { payload } = message;
 
     if (payload.pairingId !== state.pairingId) {
-      fail("Resume pairing id mismatch");
+      fail("Resume pairing id mismatch", true);
 
       return;
     }
 
     if (!isReplayCounter(payload.counter) || payload.counter <= state.lastSeenCounter) {
-      fail("Resume counter did not advance");
+      fail("Resume counter did not advance", true);
 
       return;
     }
@@ -269,13 +270,14 @@ export const createResumeController = (
     if (isStopped) return;
 
     if (!key) {
-      fail("Resume public key does not match the pinned peer key");
+      fail("Resume public key does not match the pinned peer key", true);
 
       return;
     }
 
     if (payload.counter <= state.lastSeenCounter) {
-      fail("Resume counter did not advance");
+      log("resume counter rejected", state, { incoming: payload.counter });
+      fail("Resume counter did not advance", true);
 
       return;
     }
@@ -291,8 +293,10 @@ export const createResumeController = (
     });
     const responderChallenge = generateUrlSafeRandomString(RESUME_CHALLENGE_LENGTH);
 
+    if (pendingResponder) log("resume replaced in-flight responder", state);
+
     clearResponder();
-    const timer = setTimeout(() => fail("Authenticated resume timed out awaiting proof"), RESUME_TIMEOUT_MS);
+    const timer = setTimeout(() => fail("Authenticated resume timed out awaiting proof", true), RESUME_TIMEOUT_MS);
 
     pendingResponder = {
       key,
@@ -331,7 +335,7 @@ export const createResumeController = (
     if (!responder) return;
 
     if (payload.pairingId !== state.pairingId) {
-      fail("Resume-confirm pairing id mismatch");
+      fail("Resume-confirm pairing id mismatch", true);
 
       return;
     }
@@ -341,7 +345,12 @@ export const createResumeController = (
     if (isStopped || pendingResponder !== responder) return;
 
     if (!isProofEqual(expected, payload.proof)) {
-      fail("Resume-confirm proof is invalid");
+      log("resume-confirm proof mismatch", {
+        pairingId: state.pairingId,
+        expectedTranscript: responder.transcript,
+        proof: payload.proof,
+      });
+      fail("Resume-confirm proof is invalid", true);
 
       return;
     }
@@ -358,19 +367,19 @@ export const createResumeController = (
     if (!initiator) return;
 
     if (payload.pairingId !== state.pairingId) {
-      fail("Resume-ack pairing id mismatch");
+      fail("Resume-ack pairing id mismatch", true);
 
       return;
     }
 
     if (payload.initiatorChallenge !== initiator.challenge) {
-      fail("Resume-ack challenge mismatch");
+      fail("Resume-ack challenge mismatch", true);
 
       return;
     }
 
     if (!isReplayCounter(payload.counter) || payload.counter <= state.lastSeenAckCounter) {
-      fail("Resume-ack counter did not advance");
+      fail("Resume-ack counter did not advance", true);
 
       return;
     }
@@ -380,13 +389,13 @@ export const createResumeController = (
     if (isStopped || pendingInitiator !== initiator) return;
 
     if (!key) {
-      fail("Resume-ack public key does not match the pinned peer key");
+      fail("Resume-ack public key does not match the pinned peer key", true);
 
       return;
     }
 
     if (payload.counter <= state.lastSeenAckCounter) {
-      fail("Resume-ack counter did not advance");
+      fail("Resume-ack counter did not advance", true);
 
       return;
     }

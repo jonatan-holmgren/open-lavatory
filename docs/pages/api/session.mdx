@@ -67,14 +67,3 @@ const peerInfo = session.peerInfo.get();
 The transport array passed to `createSession`/`connectSession` doubles as your preference list.
 During the handshake both peers exchange their supported transports and the first entry in the dApp's list that the wallet also supports is used — see [transport selection](/api/handshake#transport-selection).
 
-## Resuming a pairing
-
-After the session connects, `getConnectionParameters()` returns the local keypair, pinned peer key, negotiated transport identifier, pairing identity, and replay counters. The provider persists these parameters through its `storage` adapter, which defaults to localStorage in browsers.
-
-Pass saved parameters to `createSession` to authenticate the same pairing and rebuild its connection using the saved transport. Both peers must still support that transport; resumption does not exchange capabilities again.
-
-Provide `onConnectionParametersChange` in the session options to synchronously persist counter updates before resumption frames are published. A storage write failure aborts resumption; do not catch the error and continue sending.
-
-An authentication failure or a 45-second resumption timeout disconnects the session and sets `session.error`. Delete the saved pairing and re-pair through a fresh `openlv://` URI. A failed session cannot be reconnected.
-
-Receiving `close` tears down signaling and transport and rejects pending requests.

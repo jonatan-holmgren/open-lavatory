@@ -62,8 +62,9 @@ describe("signaling resume failures", () => {
     const { host, client, keys, hostChannel, clientChannel } = peers;
     const events: string[] = [];
 
-    host.layer.on("error", (reason) => {
+    host.layer.on("error", (reason, isPairingInvalidated) => {
       expect(reason).toMatch(/pairing/i);
+      expect(isPairingInvalidated).toBe(true);
       expect(host.layer.peerKey.get()).toBeUndefined();
       events.push("error");
     });
@@ -169,9 +170,11 @@ describe("signaling resume failures", () => {
   it("terminally times out an initiator after 45 seconds without an acknowledgement", async () => {
     const { host, client } = await createControlledPeers();
     const reasons: string[] = [];
+    let isPairingInvalidated = false;
 
-    client.layer.on("error", (reason) => {
+    client.layer.on("error", (reason, isInvalidated) => {
       reasons.push(reason);
+      isPairingInvalidated = isInvalidated ?? false;
     });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
@@ -186,6 +189,7 @@ describe("signaling resume failures", () => {
       expect(reasons).toHaveLength(1);
       expect(reasons[0]).toMatch(/timed out/i);
       expect(reasons[0]).toMatch(/pair/i);
+      expect(isPairingInvalidated).toBe(true);
       await expect(client.layer.resume()).rejects.toThrow(/failed/i);
     }
     finally {
