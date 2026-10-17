@@ -25,12 +25,10 @@ export default defineConfig({
   use: {
     launchOptions: systemChromium ? { executablePath: systemChromium } : {},
   },
-  webServer: [
-    {
-      command: "pnpm --dir ../examples/sandbox dev --port 5199 --strictPort",
-      url: "http://localhost:5199",
-      reuseExistingServer: !process.env["CI"],
-      timeout: 60_000,
-    },
-  ],
+  webServer: {
+    command: "pnpm --dir ../examples/sandbox dev --port 5199 --strictPort",
+    url: "http://localhost:5199",
+    reuseExistingServer: !process.env["CI"],
+    timeout: 60_000,
+  },
 });
