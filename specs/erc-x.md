@@ -12,9 +12,7 @@ requires: 1193
 
 ## Abstract
 
-This specification defines `open-lavatory`, hereafter `openlv`, an Ethereum wallet-dapp wire protocol for session establishment and transport of EIP-1193 messages.
-`openlv` standardizes a bootstrap URI, encrypted signaling frames, transport negotiation messages, a correlated session message envelope, and an authenticated session resumption model.
-It builds upon the wallet pairing flow introduced by [ERC-1328](./eip-1328.md).
+This specification defines open-lavatory, hereafter openlv, an Ethereum wallet-dapp connectivity protocol for session establishment and transport of EIP-1193 messages. openlv standardizes a bootstrap URI, encrypted signaling frames, transport negotiation messages, a correlated session message envelope, and an optional session resumption model. It builds upon the wallet pairing flow introduced by ERC-1328.
 
 ## Motivation
 
@@ -312,7 +310,6 @@ Resumption is a three-message handshake carried in peer-key encrypted signaling 
 3. The initiator verifies the `pairingId`, the pinned public key, the `counter`, and the echoed challenge, then sends `resume-confirm` carrying a `proof`.
 
 `proof` is the lowercase hex encoding of `SHA-256(pairingId | initiatorPublicKey | responderPublicKey | initiatorChallenge | responderChallenge | initiatorCounter | responderCounter)`, where the parts are joined with `|`.
-The responder's fresh `challenge` is delivered only inside the peer-key encrypted `resume-ack`, so only a holder of the pinned private key can compute a `proof` the responder accepts.
 The responder MUST NOT accept a resume before verifying `resume-confirm`.
 
 Implementations MUST ignore a resume whose `pairingId` or advertised public key does not match, whose `counter` is not strictly greater than the highest counter already seen, whose `initiatorChallenge` does not match, or whose `proof` is invalid.
@@ -346,7 +343,6 @@ base64(ephemeralPublicKey || nonce || ciphertext)
 ```
 
 This same peer-key mechanism is also used to protect payloads exchanged through the negotiated transport layer.
-Session resumption reuses it: resume frames are encrypted to the peers' pinned static public keys, and version 1 does not perform a fresh key agreement for resumed sessions.
 
 These cryptographic mechanisms define the current interoperable behavior, but future revisions MAY define alternative suites or explicit cryptographic negotiation.
 
@@ -424,7 +420,7 @@ Resumption MUST use the monotonic per-pairing `counter` for replay protection, a
 Because resumed sessions reuse the handshake's peer-key encryption to the pinned static keys rather than a fresh key agreement, version 1 resumption does not provide forward secrecy.
 A failed `pairingId`, pin, counter, challenge, or `proof` check MUST fail closed and require re-pairing through a fresh out-of-band `openlv://` URI.
 
-Persisted session state is sensitive. Browser implementations MAY use localStorage, where scripts running on the same origin can access the serialized private keys.
+Persisted session state is sensitive.
 Implementations SHOULD allow users to disconnect and delete saved session state.
 
 ## Copyright
