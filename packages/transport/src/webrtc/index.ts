@@ -82,7 +82,7 @@ export const webrtc: Transport = (
     const onIceGatheringStateChange = () => {
       log("iceGatheringState", connection?.iceGatheringState);
 
-      if (localCandidates === 0 && connection?.iceGatheringState === "complete") {
+      if (connection?.iceGatheringState === "complete" && localCandidates === 0) {
         // Deliberately not debug-gated: without a single local candidate the
         // connection can never establish, and the cause is environmental
         // (blocked UDP, no usable interface, unreachable STUN/TURN).
