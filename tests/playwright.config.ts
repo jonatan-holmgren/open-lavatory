@@ -32,11 +32,5 @@ export default defineConfig({
       reuseExistingServer: !process.env["CI"],
       timeout: 60_000,
     },
-    {
-      command: "pnpm --dir ../docs dev --host 127.0.0.1 --port 5198 --strictPort",
-      url: "http://127.0.0.1:5198/try",
-      reuseExistingServer: !process.env["CI"],
-      timeout: 120_000,
-    },
   ],
 });

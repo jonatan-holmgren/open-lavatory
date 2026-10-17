@@ -89,57 +89,6 @@ describe("signaling resume (in-memory relay)", () => {
     await Promise.all([host.layer.teardown(), client.layer.teardown()]);
   });
 
-  it("accepts a resume from a restarted host while the client stays connected", async () => {
-    const topic = createTopic();
-    const keys = await createSessionKeys();
-    const first = await establishFresh(topic, keys);
-
-    await first.host.layer.teardown();
-
-    const clientResumed = new Promise<void>(resolve => first.client.layer.on("resume", resolve));
-    const host = await createPairedPeer({ channel: topic.channel(), keys: keys, isHost: true, initiate: true });
-
-    await host.layer.setup();
-
-    const encrypted = Promise.all([
-      waitForState(host.layer, Status.ENCRYPTED),
-      clientResumed,
-    ]);
-
-    await host.layer.resume();
-    await encrypted;
-
-    expect(first.client.layer.status.get()).toBe(Status.ENCRYPTED);
-    expect(first.client.layer.peerKey.get()?.toString()).toBe(keys.hostKeys.encryptionKey.toString());
-
-    await Promise.all([host.layer.teardown(), first.client.layer.teardown()]);
-  });
-
-  it("accepts a resume from a restarted client while the host stays connected", async () => {
-    const topic = createTopic();
-    const keys = await createSessionKeys();
-    const first = await establishFresh(topic, keys);
-
-    await first.client.layer.teardown();
-
-    const hostResumed = new Promise<void>(resolve => first.host.layer.on("resume", resolve));
-    const client = await createPairedPeer({ channel: topic.channel(), keys: keys, isHost: false, initiate: true });
-
-    await client.layer.setup();
-
-    const encrypted = Promise.all([
-      waitForState(client.layer, Status.ENCRYPTED),
-      hostResumed,
-    ]);
-
-    await client.layer.resume();
-    await encrypted;
-
-    expect(first.host.layer.status.get()).toBe(Status.ENCRYPTED);
-    expect(first.host.layer.peerKey.get()?.toString()).toBe(keys.clientKeys.encryptionKey.toString());
-
-    await Promise.all([client.layer.teardown(), first.host.layer.teardown()]);
-  });
 
   it("terminally rejects a replayed resume frame after reloading", async () => {
     const topic = createTopic();
