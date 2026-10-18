@@ -15,7 +15,6 @@ import { webrtc } from "@openlv/transport/webrtc";
 import { useEffect, useMemo, useState } from "react";
 import type { EIP1193Provider } from "viem";
 import type { Config, Connector } from "wagmi";
-import { reconnect } from "wagmi/actions";
 
 import {
   attachTryItSession,
@@ -72,56 +71,13 @@ const walletInfo = (connector: Connector): PeerInfo => {
   };
 };
 
-const pause = (milliseconds: number, signal: AbortSignal) =>
-  new Promise<void>((resolve, reject) => {
-    const abort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    }, milliseconds);
+const readyConnector = async (connector: Connector, signal: AbortSignal) => {
+  signal.throwIfAborted();
+  const provider = await connector.getProvider() as EIP1193Provider | undefined;
 
-    signal.addEventListener("abort", abort, { once: true });
+  if (!provider) throw new Error("Wallet provider is not ready");
 
-    if (signal.aborted) abort();
-  });
-
-// Discovery and wagmi hydration can finish after the first React render.
-// Reconnect only authorized injected connectors; never open an approval prompt.
-const readyConnector = async (config: Config, signal: AbortSignal) => {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    signal.throwIfAborted();
-    const connection = config.state.connections.get(config.state.current ?? "");
-    const connector = connection?.connector;
-
-    if (connector?.type !== "openLv" && typeof connector?.getProvider === "function") {
-      try {
-        const provider = await connector.getProvider() as EIP1193Provider | undefined;
-
-        if (provider) return { connector, provider };
-      }
-      catch {
-        // Some injected providers are announced before their bridge is ready.
-      }
-    }
-
-    if (config.state.status === "disconnected") {
-      try {
-        await reconnect(config, {
-          connectors: config.connectors.filter(candidate => candidate.type !== "openLv"),
-        });
-      }
-      catch {
-        // Discovery can finish on the next bounded readiness attempt.
-      }
-    }
-
-    await pause(250, signal);
-  }
-
-  throw new Error("Wallet provider is not ready");
+  return { connector, provider };
 };
 
 /** Join or restore a pairing, publishing its handles before connecting so it can be cancelled. */
@@ -224,7 +180,7 @@ const connectWalletSession = async (
 
 /**
  * Own the raw wallet pairing independently of the injected-wallet UI mount.
- * Every retry reloads the durable high-water counters, never the first snapshot.
+ * Each restore attempt reloads the durable high-water counters.
  */
 export const useWalletSession = (config: Config, actions: TryItSessionActions): WalletSessionLifecycle => {
   const [active, setActive] = useState(false);
@@ -255,7 +211,7 @@ export const useWalletSession = (config: Config, actions: TryItSessionActions): 
         actions.resetSession();
       }
     };
-    const run = async (parameters?: string) => {
+    const run = async (parameters?: string, preferredConnector?: Connector) => {
       if (!parameters && !loadWalletSession()) return;
 
       const cleanup = parameters ? end() : release(false);
@@ -270,71 +226,67 @@ export const useWalletSession = (config: Config, actions: TryItSessionActions): 
 
       setConnecting(true);
 
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          const ready = await readyConnector(config, controller.signal);
-          const material = parameters ?? loadWalletSession();
+      try {
+        let connector = preferredConnector;
 
-          if (!material) break;
+        if (!connector) {
+          for (const candidate of config.state.connections.values()) {
+            if (candidate.connector.type !== "openLv" && candidate.accounts.length > 0) {
+              connector = candidate.connector;
 
-          actions.setPhase("establishing");
-          actions.setPeer(peerInfoFromConnectionUrl(
-            "wallet",
-            typeof material === "string" ? material : encodeConnectionURL(material),
-          ));
-          await connectWalletSession(
-            material, ready.connector, ready.provider, actions, controller.signal,
-            (session, stop) => {
-              current = session;
-              detach = stop;
-            },
-            (reason) => {
-              if (isDisposed) return;
-
-              if (reason === undefined) void end();
-              else setActive(false);
-            },
-          );
-
-          controller.signal.throwIfAborted();
-          setActive(true);
-          break;
-        }
-        catch (error) {
-          if (controller.signal.aborted) return;
-
-          // Read the flag before dropping the reference: an invalidated pairing
-          // must not be retried with keys that can never authenticate again.
-          const pairingInvalidated = current?._internal.isPairingInvalidated ?? false;
-
-          current = undefined;
-
-          if (!parameters && !pairingInvalidated && loadWalletSession() && attempt < 2) {
-            try {
-              await pause(500 * (attempt + 1), controller.signal);
+              break;
             }
-            catch {
-              return;
-            }
-
-            if (controller.signal.aborted) return;
-
-            continue;
           }
-
-          const reason = error instanceof Error ? error.message : String(error);
-
-          if (parameters || loadWalletSession()) actions.setPhase("error");
-
-          actions.appendEntry({
-            role: "wallet",
-            direction: "in",
-            kind: "info",
-            summary: "Connection failed",
-            payload: { message: reason },
-          });
-          break;
         }
+
+        if (!connector) throw new Error("No authorized wallet connector is connected");
+
+        const ready = await readyConnector(connector, controller.signal);
+        const material = parameters ?? loadWalletSession();
+
+        if (!material) {
+          if (!isDisposed && !controller.signal.aborted) setConnecting(false);
+
+          return;
+        }
+
+        actions.setPhase("establishing");
+        actions.setPeer(peerInfoFromConnectionUrl(
+          "wallet",
+          typeof material === "string" ? material : encodeConnectionURL(material),
+        ));
+        await connectWalletSession(
+          material, ready.connector, ready.provider, actions, controller.signal,
+          (session, stop) => {
+            current = session;
+            detach = stop;
+          },
+          (reason) => {
+            if (isDisposed) return;
+
+            if (reason === undefined) void end();
+            else setActive(false);
+          },
+        );
+
+        controller.signal.throwIfAborted();
+        setActive(true);
+      }
+      catch (error) {
+        if (controller.signal.aborted) return;
+
+        current = undefined;
+        const reason = error instanceof Error ? error.message : String(error);
+
+        if (parameters || loadWalletSession()) actions.setPhase("error");
+
+        actions.appendEntry({
+          role: "wallet",
+          direction: "in",
+          kind: "info",
+          summary: "Connection failed",
+          payload: { message: reason },
+        });
       }
 
       if (!isDisposed && !controller.signal.aborted) setConnecting(false);
@@ -342,10 +294,10 @@ export const useWalletSession = (config: Config, actions: TryItSessionActions): 
 
     return {
       connect: (url: string) => run(url),
-      resume: () => {
+      resume: (connector?: Connector) => {
         isDisposed = false;
 
-        return run();
+        return run(undefined, connector);
       },
       end,
       dispose: () => {
@@ -356,10 +308,39 @@ export const useWalletSession = (config: Config, actions: TryItSessionActions): 
   }, [config, actions]);
 
   useEffect(() => {
-    void lifecycle.resume();
+    let lastConnectorUid: string | undefined;
+    const stopWatching = config.subscribe(
+      state => state.connections,
+      (connections) => {
+        let connector: Connector | undefined;
 
-    return lifecycle.dispose;
-  }, [lifecycle]);
+        for (const candidate of connections.values()) {
+          if (candidate.connector.type !== "openLv" && candidate.accounts.length > 0) {
+            connector = candidate.connector;
+
+            break;
+          }
+        }
+
+        if (!connector) {
+          lastConnectorUid = undefined;
+
+          return;
+        }
+
+        if (connector.uid === lastConnectorUid) return;
+
+        lastConnectorUid = connector.uid;
+        void lifecycle.resume(connector);
+      },
+      { emitImmediately: true },
+    );
+
+    return () => {
+      stopWatching();
+      lifecycle.dispose();
+    };
+  }, [config, lifecycle]);
 
   return { active, connecting, connect: lifecycle.connect, end: lifecycle.end };
 };
