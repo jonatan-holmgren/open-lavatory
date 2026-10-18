@@ -69,7 +69,7 @@ describe("authenticated signaling resume", () => {
     expect(failures).toEqual([]);
   });
 
-  it("ignores stale resume-ack counters before checking pairing identity", async () => {
+  it("ignores resume-ack frames with a mismatched pairing identity", async () => {
     const sent: SignalMessage[] = [];
     const { controller, saved, failures } = await setup({
       initiate: true,
@@ -87,7 +87,7 @@ describe("authenticated signaling resume", () => {
         publicKey: "not-the-pinned-key",
         challenge: "stale-challenge",
         initiatorChallenge: "wrong-challenge",
-        counter: 2,
+        counter: 3,
       },
       timestamp: 0,
     });
@@ -95,15 +95,24 @@ describe("authenticated signaling resume", () => {
     expect(saved).toHaveLength(1);
     expect(sent).toHaveLength(1);
     expect(failures).toEqual([]);
+    controller.teardown();
   });
 
-  it("invalidates a pairing when an advancing resume advertises a mismatched pin", async () => {
-    const { controller, failures } = await setup();
+  it("ignores advancing resumes with mismatched pairing identity or pinned key", async () => {
+    const { controller, peer, failures, saved } = await setup();
     const wrongPeer = await generateKeyPair();
 
+    await controller.handleResume({
+      ...frame(3, peer.encryptionKey.toString()),
+      payload: { ...frame(3, peer.encryptionKey.toString()).payload, pairingId: "another-pairing" },
+    });
     await controller.handleResume(frame(3, wrongPeer.encryptionKey.toString()));
-    expect(failures).toHaveLength(1);
-    expect(failures[0]?.[1]).toBe(true);
+    expect(failures).toEqual([]);
+    expect(saved).toEqual([]);
+
+    await controller.handleResume(frame(3, peer.encryptionKey.toString()));
+    expect(saved).toHaveLength(1);
+    expect(failures).toEqual([]);
   });
 
   it("does not publish an ack when advancing counter persistence fails", async () => {
@@ -121,29 +130,37 @@ describe("authenticated signaling resume", () => {
     expect(failures[0]?.[1]).toBe(false);
   });
 
-  it("invalidates an authenticated exchange when the confirm proof is wrong", async () => {
+  it("ignores a resume-confirm with an invalid proof without invalidating pairing", async () => {
     const { controller, peer, failures } = await setup();
 
     await controller.handleResume(frame(3, peer.encryptionKey.toString()));
     await controller.handleResumeConfirm({ type: "resume-confirm", payload: { pairingId, proof: "0".repeat(64) }, timestamp: 0 });
-    expect(failures).toHaveLength(1);
-    expect(failures[0]?.[1]).toBe(true);
+    expect(failures).toEqual([]);
+    controller.teardown();
   });
 
-  it("fails closed when the bounded responder deadline expires", async () => {
-    vi.useFakeTimers();
-    const { controller, peer, failures } = await setup();
+  it("does not persist an inbound counter before the sender proves the pinned key", async () => {
+    const { controller, peer, saved } = await setup();
 
-    await controller.handleResume(frame(3, peer.encryptionKey.toString()));
+    await controller.handleResume(frame(Number.MAX_SAFE_INTEGER, peer.encryptionKey.toString()));
+    expect(saved.at(-1)?.lastSeenCounter).toBe(2);
+    controller.teardown();
+  });
+
+  it("ends an unauthenticated resume timeout without invalidating or advancing pairing state", async () => {
+    vi.useFakeTimers();
+    const { controller, peer, failures, saved } = await setup();
+
+    await controller.handleResume(frame(Number.MAX_SAFE_INTEGER, peer.encryptionKey.toString()));
     await vi.advanceTimersByTimeAsync(45_000);
     expect(failures).toHaveLength(1);
-    expect(failures[0]?.[1]).toBe(true);
+    expect(failures[0]?.[1]).toBe(false);
+    expect(saved.at(-1)?.lastSeenCounter).toBe(2);
   });
 
   it("keeps the inbound proof obligation alive after completing its simultaneous outbound exchange", async () => {
     const sent: SignalMessage[] = [];
-    const { controller, peer, local, failures, resumed } = await setup({
-      initiate: true,
+    const { controller, peer, local, failures, resumed, saved } = await setup({
       send: async (message) => {
         sent.push(message as SignalMessage);
       },
@@ -179,6 +196,7 @@ describe("authenticated signaling resume", () => {
 
     await controller.handleResumeConfirm({ type: "resume-confirm", payload: { pairingId, proof }, timestamp: 0 } satisfies SignalMessageResumeConfirm);
     expect(failures).toEqual([]);
+    expect(saved.at(-1)?.lastSeenCounter).toBe(3);
     expect(resumed.filter(value => value === peer.encryptionKey.toString())).toHaveLength(2);
     expect(resumed.filter(value => value === "resumed")).toHaveLength(1);
   });

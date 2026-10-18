@@ -14,9 +14,8 @@ const RESUME_CHALLENGE_LENGTH = 16;
 const RESUME_TIMEOUT_MS = 45_000;
 
 /**
- * Durable state for an authenticated resume. Each counter is persisted before
- * its frame is sent, so a process restart cannot make a captured frame fresh
- * again.
+ * Outbound counters are persisted before publishing their frames. Inbound
+ * replay counters are persisted only after the initiator proves the pairing key.
  */
 export type SignalingResumeState = {
   pairingId: string;
@@ -165,6 +164,10 @@ export const createResumeController = (
     pendingResponder?.cancelTimeout();
     pendingResponder = undefined;
   };
+  const highestSeenResumeCounter = () => Math.max(
+    state.lastSeenCounter,
+    pendingResponder?.transcript.initiatorCounter ?? state.lastSeenCounter,
+  );
 
   const teardown = () => {
     isStopped = true;
@@ -175,7 +178,9 @@ export const createResumeController = (
   const fail = (reason: string, isPairingInvalidated = false) => {
     if (isStopped) return;
 
-    failureReason = `${reason}; re-pair through a fresh openlv:// URI`;
+    failureReason = isPairingInvalidated
+      ? `${reason}; re-pair through a fresh openlv:// URI`
+      : reason;
     teardown();
     onFailure(failureReason, isPairingInvalidated);
   };
@@ -243,7 +248,7 @@ export const createResumeController = (
     persist({ ...state, lastCounter: counter });
     const challenge = generateUrlSafeRandomString(RESUME_CHALLENGE_LENGTH);
 
-    const timer = setTimeout(() => fail("Authenticated resume timed out", true), RESUME_TIMEOUT_MS);
+    const timer = setTimeout(() => fail("Authenticated resume timed out"), RESUME_TIMEOUT_MS);
 
     pendingInitiator = {
       challenge,
@@ -269,43 +274,30 @@ export const createResumeController = (
 
     const { payload } = message;
 
-    if (!isAdvancingCounter("resume", payload.counter, state.lastSeenCounter)) return;
+    if (!isAdvancingCounter("resume", payload.counter, highestSeenResumeCounter())) return;
 
-    if (payload.pairingId !== state.pairingId) {
-      fail("Resume pairing id mismatch", true);
-
-      return;
-    }
+    if (payload.pairingId !== state.pairingId) return;
 
     const key = await parsePinnedKey(payload.publicKey);
 
-    if (isStopped) return;
-
-    if (!key) {
-      fail("Resume public key does not match the pinned peer key", true);
-
-      return;
-    }
+    if (isStopped || !key) return;
 
     // Another concurrently delivered resume may have advanced this counter
     // while the pinned-key parser was awaiting.
-    if (!isAdvancingCounter("resume", payload.counter, state.lastSeenCounter)) return;
+    if (!isAdvancingCounter("resume", payload.counter, highestSeenResumeCounter())) return;
 
     const responderCounter = nextCounter();
 
     if (responderCounter === undefined) return;
 
-    persist({
-      ...state,
-      lastCounter: responderCounter,
-      lastSeenCounter: payload.counter,
-    });
+    // Persist the responder's own outbound counter before publishing its ack.
+    persist({ ...state, lastCounter: responderCounter });
     const responderChallenge = generateUrlSafeRandomString(RESUME_CHALLENGE_LENGTH);
 
     if (pendingResponder) log("resume replaced in-flight responder", state);
 
     clearResponder();
-    const timer = setTimeout(() => fail("Authenticated resume timed out awaiting proof", true), RESUME_TIMEOUT_MS);
+    const timer = setTimeout(() => fail("Authenticated resume timed out awaiting proof"), RESUME_TIMEOUT_MS);
 
     pendingResponder = {
       key,
@@ -343,26 +335,19 @@ export const createResumeController = (
 
     if (!responder) return;
 
-    if (payload.pairingId !== state.pairingId) {
-      fail("Resume-confirm pairing id mismatch", true);
-
-      return;
-    }
+    if (payload.pairingId !== state.pairingId) return;
 
     const expected = await computeProof(responder.transcript);
 
     if (isStopped || pendingResponder !== responder) return;
 
-    if (!isProofEqual(expected, payload.proof)) {
-      log("resume-confirm proof mismatch", {
-        pairingId: state.pairingId,
-        expectedTranscript: responder.transcript,
-        proof: payload.proof,
-      });
-      fail("Resume-confirm proof is invalid", true);
+    if (!isProofEqual(expected, payload.proof)) return;
 
-      return;
-    }
+    // Only authenticated initiator counters become durable replay high-water marks.
+    persist({
+      ...state,
+      lastSeenCounter: responder.transcript.initiatorCounter,
+    });
 
     complete(responder.key, "responder");
   };
@@ -377,27 +362,13 @@ export const createResumeController = (
 
     if (!isAdvancingCounter("resume-ack", payload.counter, state.lastSeenAckCounter)) return;
 
-    if (payload.pairingId !== state.pairingId) {
-      fail("Resume-ack pairing id mismatch", true);
+    if (payload.pairingId !== state.pairingId) return;
 
-      return;
-    }
-
-    if (payload.initiatorChallenge !== initiator.challenge) {
-      fail("Resume-ack challenge mismatch", true);
-
-      return;
-    }
+    if (payload.initiatorChallenge !== initiator.challenge) return;
 
     const key = await parsePinnedKey(payload.publicKey);
 
-    if (isStopped || pendingInitiator !== initiator) return;
-
-    if (!key) {
-      fail("Resume-ack public key does not match the pinned peer key", true);
-
-      return;
-    }
+    if (isStopped || pendingInitiator !== initiator || !key) return;
 
     // A concurrent ack may have advanced the persisted high-water mark while
     // pinned-key parsing awaited; only the still-newer ack may proceed.
