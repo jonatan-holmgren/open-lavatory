@@ -57,7 +57,6 @@ export const SessionStatus = {
 } as const;
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
 
-
 export type SessionOptions = {
   info?: PeerInfo;
   /** Called synchronously before a resumed counter is sent. */
@@ -126,6 +125,10 @@ export const createSession = async (
 
   if (hasConnectionMaterial && !savedConnection) {
     throw new Error("Invalid saved session. Request a fresh pairing URI and try again.");
+  }
+
+  if (savedConnection && !options?.onConnectionParametersChange) {
+    throw new Error("Resuming a saved session requires durable connection parameter persistence");
   }
 
   const emitter = new EventEmitter<SessionEvents>();
@@ -385,6 +388,9 @@ export const createSession = async (
 
     if (!layer) {
       log("no common transport with peer", capabilities.transports, peerCapabilities?.transports);
+
+      if (isResuming) isPairingInvalidated = true;
+
       setLastErrorIfUnset("No common transport with peer");
       await teardown();
 

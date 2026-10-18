@@ -1,15 +1,15 @@
 import { observable } from "@openlv/core";
 import type { EncryptionKey } from "@openlv/core/encryption";
-import { EventEmitter } from "eventemitter3";
 import {
-  Status as SignalingStatus,
   type PeerCapabilities,
   type SignalingLayer,
+  Status as SignalingStatus,
 } from "@openlv/signaling";
 import {
   Status as TransportStatus,
   type TransportLayerFunction,
 } from "@openlv/transport";
+import { EventEmitter } from "eventemitter3";
 import { describe, expect, it, vi } from "vitest";
 
 const { loadSignaling } = vi.hoisted(() => ({ loadSignaling: vi.fn() }));
@@ -18,6 +18,13 @@ vi.mock("./dynamic.js", () => ({
   loadSignaling,
   loadTransport: vi.fn(),
 }));
+
+const createSignalingLoader = (signaling: SignalingLayer) => {
+  const createSignal = async () => signaling;
+  const createChannel = async () => createSignal;
+
+  return async () => createChannel;
+};
 
 import { createSession, SessionStatus } from "./index.js";
 
@@ -47,7 +54,7 @@ const createConnectedSession = async () => {
     send: vi.fn(async () => {}),
   }) as unknown as SignalingLayer;
 
-  loadSignaling.mockImplementation(async () => async () => async () => signaling);
+  loadSignaling.mockImplementation(createSignalingLoader(signaling));
 
   const transport: TransportLayerFunction = {
     transportId: "wrtc",
