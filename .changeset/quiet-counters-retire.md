@@ -11,7 +11,7 @@ Restore durable replay counters for authenticated session resumption.
 
 - Signaling: `resume` and `resume-ack` carry a monotonic counter; persisted high-water marks survive restart and bind the authenticated proof
 - Signaling ignores bootstrap messages once a peer key is pinned; old pairing URIs and recorded capabilities cannot bypass authenticated resumption, while unpinned hosts still accept interrupted-scan retries
-- Session: saved sessions include the negotiated transport so resumed peers select the same transport without re-exchanging capabilities; an inbound `close` tears down the whole session
+- Session: saved sessions include the negotiated transport so resumed peers select the same transport without re-exchanging capabilities; close messages carry no `messageId` or acknowledgement, and receiving one tears down the session
 - Provider: settings use `storage`, while saved sessions use the optional `sessionStorage` adapter (falling back to `storage`); browsers default to localStorage, and the docs isolate dApp and wallet state per tab
 - Core: persisted session parameters validate the replay counters and selected transport; malformed or incomplete saved state is rejected before signaling instead of starting a fresh handshake with restored keys
 - Authentication failures and 45-second resume deadline expiry invalidate saved pairings; transient network failures retain replay counters for a later restore. Counter updates persist before publication, and write failures abort sending.

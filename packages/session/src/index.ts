@@ -57,7 +57,6 @@ export const SessionStatus = {
 } as const;
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
 
-const CLOSE_ACK_TIMEOUT_MS = 2000;
 
 export type SessionOptions = {
   info?: PeerInfo;
@@ -221,42 +220,6 @@ export const createSession = async (
   signal.peerCapabilities.subscribe(received => setPeerInfo(received?.info));
 
   let transport: TransportLayer | undefined;
-  const sendClose = async (current: TransportLayer) => {
-    const messageId = crypto.randomUUID();
-
-    await new Promise<void>((resolve, reject) => {
-      const cleanup = () => {
-        clearTimeout(timeout);
-        messages.off("message", onMessage);
-        messages.off("ended", onEnded);
-      };
-      const onMessage = (message: SessionMessageAck | SessionMessageResponse) => {
-        if (message.type !== "ack" || message.messageId !== messageId) return;
-
-        cleanup();
-        resolve();
-      };
-      const onEnded = (reason: string) => {
-        cleanup();
-        reject(new Error(reason));
-      };
-
-      messages.on("message", onMessage);
-      messages.on("ended", onEnded);
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error("Peer did not acknowledge session close"));
-      }, CLOSE_ACK_TIMEOUT_MS);
-
-      void current.send({
-        type: "close",
-        messageId,
-      } satisfies SessionMessage).catch((error: unknown) => {
-        cleanup();
-        reject(error);
-      });
-    });
-  };
   // The peer can start renegotiating as soon as it observes our resume, which
   // can be before this side has finished building its transport. Buffer those
   // negotiation frames instead of dropping them so the offer is not lost.
@@ -442,16 +405,6 @@ export const createSession = async (
 
         try {
           if (message.type === "close") {
-            try {
-              await current.send({
-                type: "ack",
-                messageId: message.messageId,
-              } satisfies SessionMessage);
-            }
-            catch (error) {
-              log("failed to acknowledge close to peer", error);
-            }
-
             await teardown();
 
             return;
@@ -605,11 +558,13 @@ export const createSession = async (
       }
     },
     async close({ notifyPeer = true } = {}) {
-      try {
-        if (notifyPeer && transport) await sendClose(transport);
-      }
-      catch (error) {
-        log("failed to send close to peer", error);
+      if (notifyPeer && transport) {
+        try {
+          await transport.send({ type: "close" } satisfies SessionMessage);
+        }
+        catch (error) {
+          log("failed to send close to peer", error);
+        }
       }
 
       await teardown();

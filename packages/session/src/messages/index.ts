@@ -28,7 +28,6 @@ export type SessionMessageAck = {
 
 export type SessionMessageClose = {
   type: "close";
-  messageId: string;
 };
 
 export const respondToRequest = async (
