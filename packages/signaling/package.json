@@ -58,8 +58,8 @@
     "eventemitter3": "^5",
     "globals": "^16",
     "gun": "^0.2020.1241",
-    "ts-pattern": "^5",
-    "websocket-mqtt": "0.0.7"
+    "websocket-mqtt": "0.0.7",
+    "ts-pattern": "^5"
   },
   "devDependencies": {
     "typescript": "^5",

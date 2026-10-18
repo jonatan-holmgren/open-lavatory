@@ -107,6 +107,18 @@ const isProofEqual = (a: string, b: string): boolean => {
   return difference === 0;
 };
 
+const isAdvancingCounter = (
+  kind: "resume" | "resume-ack",
+  counter: number,
+  highWater: number,
+): boolean => {
+  if (isReplayCounter(counter) && counter > highWater) return true;
+
+  log(`ignoring non-advancing ${kind} counter`, { counter, highWater });
+
+  return false;
+};
+
 export const createResumeController = (
   hooks: ResumeControllerHooks,
 ): ResumeController => {
@@ -128,6 +140,7 @@ export const createResumeController = (
   };
   let isStopped = false;
   let failureReason: string | undefined;
+  let didResume = false;
   let pendingInitiator:
     | {
       challenge: string;
@@ -204,15 +217,18 @@ export const createResumeController = (
     }
   };
 
-  const complete = (key: EncryptionKey) => {
+  const complete = (key: EncryptionKey, role: "initiator" | "responder") => {
     if (isStopped) return;
 
-    clearInitiator();
-    clearResponder();
+    if (role === "initiator") clearInitiator();
+    else clearResponder();
 
     acceptPeerKey(key);
 
-    if (!isStopped) onResumed();
+    if (!isStopped && !didResume) {
+      didResume = true;
+      onResumed();
+    }
   };
 
   const resume = async () => {
@@ -253,14 +269,10 @@ export const createResumeController = (
 
     const { payload } = message;
 
+    if (!isAdvancingCounter("resume", payload.counter, state.lastSeenCounter)) return;
+
     if (payload.pairingId !== state.pairingId) {
       fail("Resume pairing id mismatch", true);
-
-      return;
-    }
-
-    if (!isReplayCounter(payload.counter) || payload.counter <= state.lastSeenCounter) {
-      fail("Resume counter did not advance", true);
 
       return;
     }
@@ -275,12 +287,9 @@ export const createResumeController = (
       return;
     }
 
-    if (payload.counter <= state.lastSeenCounter) {
-      log("resume counter rejected", state, { incoming: payload.counter });
-      fail("Resume counter did not advance", true);
-
-      return;
-    }
+    // Another concurrently delivered resume may have advanced this counter
+    // while the pinned-key parser was awaiting.
+    if (!isAdvancingCounter("resume", payload.counter, state.lastSeenCounter)) return;
 
     const responderCounter = nextCounter();
 
@@ -355,7 +364,7 @@ export const createResumeController = (
       return;
     }
 
-    complete(responder.key);
+    complete(responder.key, "responder");
   };
 
   const handleResumeAck = async (message: SignalMessageResumeAck) => {
@@ -366,6 +375,8 @@ export const createResumeController = (
 
     if (!initiator) return;
 
+    if (!isAdvancingCounter("resume-ack", payload.counter, state.lastSeenAckCounter)) return;
+
     if (payload.pairingId !== state.pairingId) {
       fail("Resume-ack pairing id mismatch", true);
 
@@ -374,12 +385,6 @@ export const createResumeController = (
 
     if (payload.initiatorChallenge !== initiator.challenge) {
       fail("Resume-ack challenge mismatch", true);
-
-      return;
-    }
-
-    if (!isReplayCounter(payload.counter) || payload.counter <= state.lastSeenAckCounter) {
-      fail("Resume-ack counter did not advance", true);
 
       return;
     }
@@ -394,11 +399,9 @@ export const createResumeController = (
       return;
     }
 
-    if (payload.counter <= state.lastSeenAckCounter) {
-      fail("Resume-ack counter did not advance", true);
-
-      return;
-    }
+    // A concurrent ack may have advanced the persisted high-water mark while
+    // pinned-key parsing awaited; only the still-newer ack may proceed.
+    if (!isAdvancingCounter("resume-ack", payload.counter, state.lastSeenAckCounter)) return;
 
     persist({ ...state, lastSeenAckCounter: payload.counter });
 
@@ -425,7 +428,7 @@ export const createResumeController = (
 
     if (isStopped || pendingInitiator !== initiator) return;
 
-    complete(key);
+    complete(key, "initiator");
   };
 
   return {
@@ -437,3 +440,4 @@ export const createResumeController = (
     handleResumeConfirm,
   };
 };
+
