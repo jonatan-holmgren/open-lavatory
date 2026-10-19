@@ -116,6 +116,20 @@ describe("parseSignalMessage", () => {
     })).toMatch(/icon/);
   });
 
+  it("parses a resume-confirm challenge echo", () => {
+    expect(parseSignalMessage(frame("resume-confirm", {
+      pairingId: "pairing",
+      challenge: "fresh-responder-challenge",
+    }))).toMatchObject({
+      type: "resume-confirm",
+      payload: { pairingId: "pairing", challenge: "fresh-responder-challenge" },
+    });
+    expect(parseSignalMessage(frame("resume-confirm", {
+      pairingId: "pairing",
+      proof: "a".repeat(64),
+    }))).toBeUndefined();
+  });
+
   it("still parses flash, pubkey, and data", () => {
     expect(parseSignalMessage(frame("flash", {}))).toMatchObject({ type: "flash" });
     expect(

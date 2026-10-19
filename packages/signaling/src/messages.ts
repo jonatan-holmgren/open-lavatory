@@ -49,8 +49,8 @@ export type SignalMessageCapabilities = SignalMessageBase<
 export type SignalMessageData = SignalMessageBase<"data", object>;
 
 /**
- * Initiates an authenticated resume of an existing pairing. Encrypted to the
- * peer's pinned static key, so it is accepted even while already encrypted.
+ * Starts a resume attempt. The payload is authenticated only after the peer
+ * key and challenge exchanges complete.
  */
 export type SignalMessageResume = SignalMessageBase<
   "resume",
@@ -80,14 +80,14 @@ export type SignalMessageResumeAck = SignalMessageBase<
 >;
 
 /**
- * Proves the initiator decrypted the responder's fresh challenge, which is only
- * possible for the holder of the pinned private key.
+ * Confirms receipt of the responder's fresh challenge, demonstrating access
+ * to the pinned initiator key that decrypted the resume acknowledgement.
  */
 export type SignalMessageResumeConfirm = SignalMessageBase<
   "resume-confirm",
   {
     pairingId: string;
-    proof: string;
+    challenge: string;
   }
 >;
 
@@ -235,12 +235,11 @@ const parseResumeConfirmPayload = (
   const payload = raw;
 
   if (!isBoundedString(payload["pairingId"], MAX_PAIRING_ID_LENGTH)) return undefined;
-
-  if (typeof payload["proof"] !== "string" || !/^[a-f0-9]{64}$/.test(payload["proof"])) return undefined;
+  if (!isBoundedString(payload["challenge"], MAX_CHALLENGE_LENGTH)) return undefined;
 
   return {
     pairingId: payload["pairingId"],
-    proof: payload["proof"],
+    challenge: payload["challenge"],
   };
 };
 

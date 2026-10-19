@@ -1,7 +1,11 @@
 import type { Observable } from "@openlv/core";
 import { make, observable } from "@openlv/core";
 import type { EncryptionKey, SymmetricKey } from "@openlv/core/encryption";
-import { parseEncryptionKey, validatePublicKeyHash } from "@openlv/core/encryption";
+import {
+  isSameEncryptionKey,
+  parseEncryptionKey,
+  validatePublicKeyHash,
+} from "@openlv/core/encryption";
 import { EventEmitter } from "eventemitter3";
 import { match } from "ts-pattern";
 
@@ -243,7 +247,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
 
           if (isStopped || status.get() !== Status.HANDSHAKE) return;
 
-          if (expectedPeerKey && receivedKey.toString() !== expectedPeerKey.toString()) {
+          if (expectedPeerKey && !isSameEncryptionKey(receivedKey, expectedPeerKey)) {
             fail("Received client public key does not match saved pairing; pair again", true);
 
             return;

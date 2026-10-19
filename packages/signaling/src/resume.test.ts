@@ -130,11 +130,15 @@ describe("authenticated signaling resume", () => {
     expect(failures[0]?.[1]).toBe(false);
   });
 
-  it("ignores a resume-confirm with an invalid proof without invalidating pairing", async () => {
+  it("ignores a resume-confirm with a mismatched challenge without invalidating pairing", async () => {
     const { controller, peer, failures } = await setup();
 
     await controller.handleResume(frame(3, peer.encryptionKey.toString()));
-    await controller.handleResumeConfirm({ type: "resume-confirm", payload: { pairingId, proof: "0".repeat(64) }, timestamp: 0 });
+    await controller.handleResumeConfirm({
+      type: "resume-confirm",
+      payload: { pairingId, challenge: "wrong-challenge" },
+      timestamp: 0,
+    });
     expect(failures).toEqual([]);
     controller.teardown();
   });
@@ -158,9 +162,9 @@ describe("authenticated signaling resume", () => {
     expect(saved.at(-1)?.lastSeenCounter).toBe(2);
   });
 
-  it("keeps the inbound proof obligation alive after completing its simultaneous outbound exchange", async () => {
+  it("keeps the inbound challenge obligation alive after completing its simultaneous outbound exchange", async () => {
     const sent: SignalMessage[] = [];
-    const { controller, peer, local, failures, resumed, saved } = await setup({
+    const { controller, peer, failures, resumed, saved } = await setup({
       send: async (message) => {
         sent.push(message as SignalMessage);
       },
@@ -184,17 +188,11 @@ describe("authenticated signaling resume", () => {
 
     await controller.handleResumeAck(ownAck);
     expect(resumed).toContain("resumed");
-    const proofInput = `${pairingId}|${peer.encryptionKey.toString()}|${local.encryptionKey.toString()}|challenge-3|${ack.payload.challenge}|3|6`;
-    const proofBytes = await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(proofInput),
-    );
-    const proof = Array.from(
-      new Uint8Array(proofBytes),
-      byte => byte.toString(16).padStart(2, "0"),
-    ).join("");
-
-    await controller.handleResumeConfirm({ type: "resume-confirm", payload: { pairingId, proof }, timestamp: 0 } satisfies SignalMessageResumeConfirm);
+    await controller.handleResumeConfirm({
+      type: "resume-confirm",
+      payload: { pairingId, challenge: ack.payload.challenge },
+      timestamp: 0,
+    } satisfies SignalMessageResumeConfirm);
     expect(failures).toEqual([]);
     expect(saved.at(-1)?.lastSeenCounter).toBe(3);
     expect(resumed.filter(value => value === peer.encryptionKey.toString())).toHaveLength(2);

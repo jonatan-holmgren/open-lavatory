@@ -1,10 +1,10 @@
 /* eslint-disable max-lines */
 import {
   decodeConnectionURL,
-  type Observable,
   observable,
   OPENLV_PROTOCOL_VERSION,
   parseSessionConnectionParameters,
+  type Observable,
   type SessionConnectionParameters,
   type SessionHandshakeParameters,
   type SessionLinkParameters,
@@ -28,20 +28,14 @@ import {
   Status as TransportStatus,
   type TransportLayer,
   type TransportLayerFunction,
-  type TransportMessage,
 } from "@openlv/transport";
 import { EventEmitter } from "eventemitter3";
 
 import { loadSignaling } from "./dynamic.js";
 import type { SessionEvents } from "./events.js";
 import { awaitCorrelatedResponse, type CorrelationEvents } from "./messages/correlate.js";
-import type {
-  SessionMessage,
-  SessionMessageAck,
-  SessionMessageRequest,
-  SessionMessageResponse,
-} from "./messages/index.js";
-import { respondToRequest } from "./messages/index.js";
+import type { SessionMessage } from "./messages/index.js";
+import { createSessionMessaging } from "./messages/route.js";
 import { log } from "./utils/log.js";
 
 export { loadSignaling, loadTransport } from "./dynamic.js";
@@ -157,6 +151,15 @@ export const createSession = async (
     transports: transportLayers.map(layer => layer.transportId),
     ...(options?.info && { info: options.info }),
   };
+  const handshakeParameters: SessionHandshakeParameters = {
+    version: OPENLV_PROTOCOL_VERSION,
+    sessionId,
+    h: hash,
+    k: handshakeKey.toString(),
+    p: protocol,
+    s: server,
+  };
+  const getHandshakeParameters = () => ({ ...handshakeParameters });
 
   let resumeState: SignalingResumeState = {
     pairingId: savedConnection?.pairingId ?? sessionId,
@@ -219,31 +222,6 @@ export const createSession = async (
     capabilities,
     isHost,
   });
-
-  signal.peerCapabilities.subscribe(received => setPeerInfo(received?.info));
-
-  let transport: TransportLayer | undefined;
-  // The peer can start renegotiating as soon as it observes our resume, which
-  // can be before this side has finished building its transport. Buffer those
-  // negotiation frames instead of dropping them so the offer is not lost.
-  let pendingNegotiation: TransportMessage[] = [];
-  let isTransportReady = false;
-  const flushPendingNegotiation = async () => {
-    if (!transport || !isTransportReady || pendingNegotiation.length === 0) return;
-
-    const buffered = pendingNegotiation;
-
-    pendingNegotiation = [];
-
-    for (const message of buffered) {
-      try {
-        await transport.handle(message);
-      }
-      catch (error) {
-        log("failed to handle buffered negotiation message", error);
-      }
-    }
-  };
   const buildConnectionParameters = (
     state: SignalingResumeState,
   ): SessionConnectionParameters => {
@@ -258,12 +236,7 @@ export const createSession = async (
     }
 
     return {
-      version: OPENLV_PROTOCOL_VERSION,
-      sessionId,
-      h: hash,
-      k: handshakeKey.toString(),
-      p: protocol,
-      s: server,
+      ...handshakeParameters,
       relyingPublicKey: relyingPublicKey.toString(),
       encryptionKey: encryptionKey.toString(),
       decryptionKey: decryptionKey.toString(),
@@ -272,8 +245,13 @@ export const createSession = async (
     };
   };
 
-  const connectionParameters = (): SessionConnectionParameters =>
-    buildConnectionParameters(resumeState);
+  signal.peerCapabilities.subscribe(received => setPeerInfo(received?.info));
+
+  let transport: TransportLayer | undefined;
+  // The peer can start renegotiating as soon as it observes our resume, which
+  // can be before this side has finished building its transport; the messaging
+  // layer buffers those negotiation frames instead of dropping them.
+  let isTransportReady = false;
 
   // Bound resumed setup immediately, but allow fresh hosts to advertise until a peer joins.
   const TRANSPORT_LINK_TIMEOUT_MS = 45_000;
@@ -289,7 +267,7 @@ export const createSession = async (
     isStopped = true;
     clearLinkDeadline();
     rejectPendingConnect?.(new Error(lastError.get() ?? "Session closed"));
-    signal.off("message", onSignalMessage);
+    signal.off("message", messaging.handleSignalMessage);
     signal.off("resume", onSignalResume);
     signal.off("error", onSignalError);
     unsubscribeSignalStatus?.();
@@ -300,7 +278,7 @@ export const createSession = async (
 
     transport = undefined;
     isTransportReady = false;
-    pendingNegotiation = [];
+    messaging.clearNegotiation();
     closingTransport?.emitter.off("error", onTransportError);
     teardownPromise = (async () => {
       try {
@@ -323,6 +301,16 @@ export const createSession = async (
     clearTimeout(linkDeadline);
     linkDeadline = undefined;
   };
+
+  const messaging = createSessionMessaging({
+    onMessage,
+    emitter,
+    messages,
+    getTransport: () => transport,
+    isTransportReady: () => isTransportReady,
+    isStopped: () => isStopped,
+    close: teardown,
+  });
 
   const onTransportStateChange = (transportStatus: TransportStatus) => {
     if (isStopped) return;
@@ -402,31 +390,7 @@ export const createSession = async (
       encrypt,
       decrypt,
       isHost,
-      async onmessage(message) {
-        if (isStopped) return;
-
-        const current = transport;
-
-        if (!current) return;
-
-        try {
-          if (message.type === "close") {
-            await teardown();
-
-            return;
-          }
-
-          if (message.type === "request") {
-            await respondToRequest(message as SessionMessageRequest, current, onMessage, emitter);
-          }
-          else if (message.type === "response" || message.type === "ack") {
-            messages.emit("message", message as SessionMessageAck | SessionMessageResponse);
-          }
-        }
-        catch (error) {
-          log("failed to handle peer message", error);
-        }
-      },
+      onmessage: messaging.handleTransportMessage,
       async subsend(message) {
         await signal.send({
           type: "request",
@@ -440,7 +404,7 @@ export const createSession = async (
     armLinkDeadline();
     await transport.setup();
     isTransportReady = true;
-    await flushPendingNegotiation();
+    await messaging.flushNegotiation();
   };
 
   const onSignalResume = async () => {
@@ -454,7 +418,7 @@ export const createSession = async (
         isTransportReady = false;
         await transport.renegotiate();
         isTransportReady = true;
-        await flushPendingNegotiation();
+        await messaging.flushNegotiation();
       }
       else {
         await startTransport();
@@ -468,32 +432,6 @@ export const createSession = async (
   const onSignalError = (reason: string, shouldInvalidatePairing = false) => {
     isPairingInvalidated ||= shouldInvalidatePairing;
     setLastError(reason);
-  };
-
-  const onSignalMessage = async (message: object) => {
-    if (isStopped) return;
-
-    const sessionMessage = message as SessionMessage;
-
-    if (sessionMessage.type === "response") {
-      messages.emit("message", sessionMessage);
-    }
-    else if (sessionMessage.type === "request") {
-      const negotiationMessage = sessionMessage.payload as TransportMessage;
-
-      if (!transport || !isTransportReady) {
-        pendingNegotiation.push(negotiationMessage);
-
-        return;
-      }
-
-      try {
-        await transport.handle(negotiationMessage);
-      }
-      catch (error) {
-        log("failed to handle negotiation message", error);
-      }
-    }
   };
 
   const onSignalStateChange = (signalStatus: SignalStatus) => {
@@ -523,7 +461,7 @@ export const createSession = async (
 
       setStatus(SessionStatus.SIGNALING);
 
-      signal.on("message", onSignalMessage);
+      signal.on("message", messaging.handleSignalMessage);
       signal.on("resume", onSignalResume);
       signal.on("error", onSignalError);
       unsubscribeSignalStatus = signal.status.subscribe(onSignalStateChange);
@@ -579,17 +517,8 @@ export const createSession = async (
     signalStatus: signal.status,
     error: lastError,
     peerInfo,
-    getHandshakeParameters() {
-      return {
-        version: OPENLV_PROTOCOL_VERSION,
-        sessionId,
-        h: hash,
-        k: handshakeKey.toString(),
-        p: protocol,
-        s: server,
-      };
-    },
-    getConnectionParameters: connectionParameters,
+    getHandshakeParameters,
+    getConnectionParameters: () => buildConnectionParameters(resumeState),
     async send(
       message: object,
       ackTimeout: number = 10_000,

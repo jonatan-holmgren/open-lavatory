@@ -127,8 +127,11 @@ export const createProvider = (
     if (operation !== generation) throw new Error("Session start canceled");
   };
 
-  /** Subscribers may synchronously close or start another session. */
-  const canResetSession = (operation: number, reason?: string): boolean => {
+  /**
+   * Reset provider state for a finished operation if no subscriber has started
+   * or closed another session. Returns whether this operation still owns state.
+   */
+  const resetSessionIfCurrent = (operation: number, reason?: string): boolean => {
     if (operation !== generation) return false;
 
     unsubscribeSessionStatus?.();
@@ -253,7 +256,7 @@ export const createProvider = (
 
         const reason = next.error.get();
 
-        if (!canResetSession(operation, reason)) return;
+        if (!resetSessionIfCurrent(operation, reason)) return;
 
         if (!reason || next._internal.isPairingInvalidated) clearSavedSession();
 
@@ -326,7 +329,7 @@ export const createProvider = (
         ?? (error_ instanceof Error ? error_.message : "Connection failed");
 
       // Retry readiness probes with the latest counters, never a half-ready session.
-      if (canResetSession(operation, reason)) {
+      if (resetSessionIfCurrent(operation, reason)) {
         generation++;
 
         if (startedSession?._internal.isPairingInvalidated) clearSavedSession();
@@ -349,7 +352,7 @@ export const createProvider = (
     restoringSession = undefined;
 
     try {
-      if (canResetSession(operation)) storage.clearSession();
+      if (resetSessionIfCurrent(operation)) storage.clearSession();
     }
     finally {
       await current?.close();

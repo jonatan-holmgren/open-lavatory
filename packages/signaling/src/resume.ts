@@ -1,7 +1,10 @@
-import { bytesToHex } from "@noble/ciphers/utils.js";
 import { isReplayCounter, OPENLV_PROTOCOL_VERSION } from "@openlv/core";
 import type { EncryptionKey } from "@openlv/core/encryption";
-import { generateUrlSafeRandomString, parseEncryptionKey } from "@openlv/core/encryption";
+import {
+  generateUrlSafeRandomString,
+  isSameEncryptionKey,
+  parseEncryptionKey,
+} from "@openlv/core/encryption";
 
 import type {
   SignalMessageResume,
@@ -15,7 +18,8 @@ const RESUME_TIMEOUT_MS = 45_000;
 
 /**
  * Outbound counters are persisted before publishing their frames. Inbound
- * replay counters are persisted only after the initiator proves the pairing key.
+ * replay counters are persisted only after the initiator proves possession of
+ * the pinned key by returning the decrypted challenge.
  */
 export type SignalingResumeState = {
   pairingId: string;
@@ -28,7 +32,7 @@ export type SignalingResumeConfig = SignalingResumeState & {
   // True when this peer should open the resume during setup; false when it
   // only needs to authenticate and accept an inbound resume.
   initiate: boolean;
-  // Persist every high-water update before its corresponding frame is sent.
+  // Persist counter high-water updates before they complete the resume exchange.
   persist: (state: SignalingResumeState) => void;
 };
 
@@ -58,52 +62,6 @@ export type ResumeControllerHooks = {
       | SignalMessageResumeAck
       | SignalMessageResumeConfirm,
   ) => Promise<void>;
-};
-
-type ResumeTranscript = {
-  pairingId: string;
-  initiatorPublicKey: string;
-  responderPublicKey: string;
-  initiatorChallenge: string;
-  responderChallenge: string;
-  initiatorCounter: number;
-  responderCounter: number;
-};
-
-const encoder = new TextEncoder();
-
-/**
- * The proof binds the resume key to the whole transcript. Only a peer that has
- * decrypted the responder's fresh challenge can reconstruct it, which is how
- * the responder authenticates the initiator before accepting.
- */
-const computeProof = async (transcript: ResumeTranscript): Promise<string> => {
-  const parts = [
-    transcript.pairingId,
-    transcript.initiatorPublicKey,
-    transcript.responderPublicKey,
-    transcript.initiatorChallenge,
-    transcript.responderChallenge,
-    transcript.initiatorCounter.toString(),
-    transcript.responderCounter.toString(),
-  ];
-  const encoded = encoder.encode(parts.join("|"));
-
-  const digest = await crypto.subtle.digest("SHA-256", encoded);
-
-  return bytesToHex(new Uint8Array(digest));
-};
-
-const isProofEqual = (a: string, b: string): boolean => {
-  if (a.length !== b.length) return false;
-
-  let difference = 0;
-
-  for (let index = 0; index < a.length; index += 1) {
-    difference |= (a.codePointAt(index) ?? 0) ^ (b.codePointAt(index) ?? 0);
-  }
-
-  return difference === 0;
 };
 
 const isAdvancingCounter = (
@@ -150,7 +108,8 @@ export const createResumeController = (
   let pendingResponder:
     | {
       key: EncryptionKey;
-      transcript: ResumeTranscript;
+      challenge: string;
+      initiatorCounter: number;
       cancelTimeout: () => void;
     }
     | undefined;
@@ -166,7 +125,7 @@ export const createResumeController = (
   };
   const highestSeenResumeCounter = () => Math.max(
     state.lastSeenCounter,
-    pendingResponder?.transcript.initiatorCounter ?? state.lastSeenCounter,
+    pendingResponder?.initiatorCounter ?? state.lastSeenCounter,
   );
 
   const teardown = () => {
@@ -215,7 +174,7 @@ export const createResumeController = (
       const key = await parseEncryptionKey(serialized);
       const pinned = expectedPeerKey ?? getPeerKey();
 
-      return pinned !== undefined && key.toString() === pinned.toString() ? key : undefined;
+      return pinned !== undefined && isSameEncryptionKey(key, pinned) ? key : undefined;
     }
     catch {
       return undefined;
@@ -297,19 +256,12 @@ export const createResumeController = (
     if (pendingResponder) log("resume replaced in-flight responder", state);
 
     clearResponder();
-    const timer = setTimeout(() => fail("Authenticated resume timed out awaiting proof"), RESUME_TIMEOUT_MS);
+    const timer = setTimeout(() => fail("Authenticated resume timed out awaiting challenge confirmation"), RESUME_TIMEOUT_MS);
 
     pendingResponder = {
       key,
-      transcript: {
-        pairingId: state.pairingId,
-        initiatorPublicKey: payload.publicKey,
-        responderPublicKey: publicKey.toString(),
-        initiatorChallenge: payload.challenge,
-        responderChallenge,
-        initiatorCounter: payload.counter,
-        responderCounter,
-      },
+      challenge: responderChallenge,
+      initiatorCounter: payload.counter,
       cancelTimeout: () => clearTimeout(timer),
     };
 
@@ -337,18 +289,13 @@ export const createResumeController = (
 
     if (payload.pairingId !== state.pairingId) return;
 
-    const expected = await computeProof(responder.transcript);
-
-    if (isStopped || pendingResponder !== responder) return;
-
-    if (!isProofEqual(expected, payload.proof)) return;
+    if (payload.challenge !== responder.challenge) return;
 
     // Only authenticated initiator counters become durable replay high-water marks.
     persist({
       ...state,
-      lastSeenCounter: responder.transcript.initiatorCounter,
+      lastSeenCounter: responder.initiatorCounter,
     });
-
     complete(responder.key, "responder");
   };
 
@@ -376,23 +323,11 @@ export const createResumeController = (
 
     persist({ ...state, lastSeenAckCounter: payload.counter });
 
-    const proof = await computeProof({
-      pairingId: state.pairingId,
-      initiatorPublicKey: publicKey.toString(),
-      responderPublicKey: payload.publicKey,
-      initiatorChallenge: initiator.challenge,
-      responderChallenge: payload.challenge,
-      initiatorCounter: initiator.counter,
-      responderCounter: payload.counter,
-    });
-
-    if (isStopped || pendingInitiator !== initiator) return;
-
     await send({
       type: "resume-confirm",
       payload: {
         pairingId: state.pairingId,
-        proof,
+        challenge: payload.challenge,
       },
       timestamp: Date.now(),
     });

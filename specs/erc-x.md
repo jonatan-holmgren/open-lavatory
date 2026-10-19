@@ -194,14 +194,13 @@ The resumption payloads are:
 ```json
 {
   "pairingId": "<pairing id>",
-  "proof": "<proof over the resume transcript>"
+  "challenge": "<echo of the responder's challenge>"
 }
 ```
 
-Every field in the `resume` and `resume-ack` payloads is REQUIRED.
-`counter` MUST be a non-negative safe integer; receivers MUST reject non-integers and negative values.
-`pairingId`, the serialized public keys, and the challenges MUST be bounded strings; receivers MUST reject empty or oversized values.
-`proof` is a lowercase hexadecimal string.
+All fields shown in the resumption payloads are REQUIRED.
+`counter` MUST be a non-negative safe integer.
+`pairingId`, public keys, and challenges MUST NOT be empty and MUST have implementation-defined size limits.
 
 ### Handshake Sequence
 
@@ -297,33 +296,21 @@ After a peer sends or receives `close`, it MUST NOT send further session message
 
 ### Session Resumption
 
-Peers MAY save pairing state to resume a session after a restart without repeating the initial handshake.
-Saved state consists of the session configuration (`sessionId`, `p`, `s`, `k`), the local X25519 keypair, the remote peer's public key, the transport identifier, a `pairingId` that remains constant for the pairing, and the replay counters. 
+Peers MAY persist pairing state to reconnect without repeating the initial handshake.
+Persisted state includes `sessionId`, `p`, `s`, `k`, the local X25519 keypair, the remote public key, the selected transport, a stable `pairingId`, and replay counters. 
 
-Resuming a session requires reconnecting to the signaling server and negotiating a new transport. Capabilities are assumed to remain unchanged.
-The resume handshake consists of three peer-key encrypted signaling messages:
+Resumption reuses the saved capabilities but requires a new signaling connection and transport negotiation.
+Resumption uses three peer-key encrypted signaling messages:
 
-1. **`resume`:** The initiator sends its `pairingId`, static public key, a new `challenge`, and an advanced `counter` to the responder's pinned public key.
-2. **`resume-ack`:** The responder checks the `pairingId`, public key, and counter. If valid, it replies with its static public key, a new `challenge`, the received challenge as `initiatorChallenge`, and its advanced `counter`.
-3. **`resume-confirm`:** The initiator checks the `pairingId`, public key, counter, and echoed challenge. If valid, it sends a `proof`.
+1. **`resume`:** The initiator sends its pairing ID, public key, fresh challenge, and incremented counter.
+2. **`resume-ack`:** After validating the request, the responder sends its public key, fresh challenge, incremented counter, and the initiator's challenge.
+3. **`resume-confirm`:** After validating the reply, the initiator echoes the responder's challenge.
 
-The `proof` is the lowercase hexadecimal SHA-256 digest of the following values, joined by `|`:
+Peers MUST reject messages with an unknown `pairingId`, a public key different from the pinned key, or a counter that does not exceed the last accepted counter. Each echoed challenge MUST match the challenge from the pending exchange.
+Resumption MUST time out if the exchange does not complete.
+A failed resumption MUST NOT trigger an automatic fresh handshake. A new pairing requires a new out-of-band `openlv://` URI.
 
-`pairingId | initiatorPublicKey | responderPublicKey | initiatorChallenge | responderChallenge | initiatorCounter | responderCounter`
-
-The responder MUST verify the `resume-confirm` proof before accepting the resumed session.
-
-Peers MUST reject resumption if:
-
-- The `pairingId` or public key differs from the saved pairing.
-- A received counter is not greater than the highest previously seen counter.
-- The remote peer's public key differs from the saved public key.
-- The echoed `initiatorChallenge` does not match.
-- The `proof` is invalid.
-
-A failed resumption MUST require a new pairing using an out-of-band `openlv://` URI.
-
-Counter high-water marks MUST be persisted before sending the corresponding resumption message.
+Peers MUST persist outbound counters before sending the corresponding message. A responder MUST NOT commit the initiator's counter until it verifies `resume-confirm`.
 
 ### Cryptography
 
@@ -424,9 +411,8 @@ Signaling infrastructure is untrusted and can observe metadata such as timing, s
 Implementations SHOULD validate decrypted JSON structure and expected message types before acting on payloads.
 Implementations SHOULD apply request timeouts and resource limits.
 
-Resumption MUST use the monotonic per-pairing `counter` for replay protection, and peers MUST reject a resume whose counter does not strictly advance.
-Because resumed sessions reuse the handshake's peer-key encryption to the pinned static keys rather than a fresh key agreement, version 1 resumption does not provide forward secrecy.
-A failed `pairingId`, pin, counter, challenge, or `proof` check MUST fail closed and require re-pairing through a fresh out-of-band `openlv://` URI.
+Resumption uses monotonically increasing per-pairing counters to reject replayed requests.
+Resumption reuses static peer keys and does not provide forward secrecy.
 
 Persisted session state is sensitive and SHOULD be stored using the strongest platform protections available.
 Implementations SHOULD allow users to disconnect and delete saved session state.

@@ -52,6 +52,12 @@ export type EncryptionKey = {
   encrypt: (message: string) => Promise<string>;
 };
 
+/** Compare two keys by their canonical serialized form. */
+export const isSameEncryptionKey = (
+  a: EncryptionKey,
+  b: EncryptionKey,
+): boolean => a.toString() === b.toString();
+
 export type DecryptionKey = {
   toString: () => string;
   decrypt: (message: string) => Promise<string>;
