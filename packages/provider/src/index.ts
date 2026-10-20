@@ -3,10 +3,14 @@ import {
   encodeConnectionURL,
   type Observable,
   observable,
-  type SessionConnectionParameters,
   type SessionLinkParameters,
 } from "@openlv/core";
-import { createSession, type Session, SessionStatus } from "@openlv/session";
+import {
+  createSession,
+  InvalidSavedSessionError,
+  type Session,
+  SessionStatus,
+} from "@openlv/session";
 import { type PeerInfo, Status as SignalStatus } from "@openlv/signaling";
 import type { TransportProtocol } from "@openlv/transport";
 import { webrtc, type WebRTCConfig } from "@openlv/transport/webrtc";
@@ -98,6 +102,11 @@ export type OpenLVProvider = OxProvider.Provider<
 >
 & ProviderBase;
 
+/** Whether startup should restore a saved pairing. */
+export const hasRestorableSession = (
+  storage: Pick<ProviderStorageR, "getSettings" | "getSession">,
+): boolean => storage.getSettings().autoReconnect && storage.getSession() !== undefined;
+
 /**
  * OpenLV Provider
  *
@@ -112,7 +121,7 @@ export const createProvider = (
   const [status, setStatus] = observable<ProviderStatus>(ProviderStatus.STANDBY);
   const [error, setError] = observable<string | undefined>(undefined);
 
-  let generation = 0;
+  let currentOperation = 0;
   let unsubscribeSessionStatus: (() => void) | undefined;
   let restoringSession: Promise<Session> | undefined;
   const storage = createProviderStorage({
@@ -123,30 +132,30 @@ export const createProvider = (
 
   status.subscribe(current => log("status", current));
 
-  const assertCurrent = (operation: number) => {
-    if (operation !== generation) throw new Error("Session start canceled");
+  const assertCurrentOperation = (operation: number) => {
+    if (operation !== currentOperation) throw new Error("Session operation superseded");
   };
 
   /**
    * Reset provider state for a finished operation if no subscriber has started
    * or closed another session. Returns whether this operation still owns state.
    */
-  const resetSessionIfCurrent = (operation: number, reason?: string): boolean => {
-    if (operation !== generation) return false;
+  const didResetSession = (operation: number, reason?: string): boolean => {
+    if (operation !== currentOperation) return false;
 
     unsubscribeSessionStatus?.();
     unsubscribeSessionStatus = undefined;
     setSession(undefined);
 
-    if (operation !== generation) return false;
+    if (operation !== currentOperation) return false;
 
     setError(reason);
 
-    if (operation !== generation) return false;
+    if (operation !== currentOperation) return false;
 
     setStatus(reason ? ProviderStatus.ERROR : ProviderStatus.STANDBY);
 
-    return operation === generation;
+    return operation === currentOperation;
   };
 
   const clearSavedSession = () => {
@@ -161,7 +170,7 @@ export const createProvider = (
   // dApps do not serve wallet RPC; emit inbound requests for observers, then
   // reject unknown methods with a JSON-RPC response.
   const onMessage = async (message: object, operation: number): Promise<object> => {
-    assertCurrent(operation);
+    assertCurrentOperation(operation);
     log("onMessage received from remote peer", message);
 
     session.get()?.emitter.emit("request", message);
@@ -195,21 +204,14 @@ export const createProvider = (
     return p && s ? { p, s } : undefined;
   };
 
-  const persistSession = (connection: SessionConnectionParameters) => {
-    if (
-      storage.getSettings().autoReconnect
-      || storage.getSession()?.pairingId === connection.pairingId
-    ) {
-      storage.setSession(connection);
-    }
-  };
-
-  const start = async (parameters?: SessionLinkParameters, operation = ++generation) => {
-    assertCurrent(operation);
+  const start = async (
+    parameters?: SessionLinkParameters,
+    operation = ++currentOperation,
+    isRestoreAttempt = false,
+  ) => {
+    assertCurrentOperation(operation);
     setError(undefined);
-    assertCurrent(operation);
     setStatus(ProviderStatus.CREATING);
-    assertCurrent(operation);
     const linkParameters = parameters ?? defaultLinkParameters();
 
     if (!linkParameters) throw new Error("No link parameters provided and no signaling defaults configured");
@@ -223,6 +225,9 @@ export const createProvider = (
     const transportOptions = iceServers.length > 0
       ? { iceServers }
       : config?.transport?.s?.webrtc;
+    // A resumed pairing must persist counters even when auto-reconnect is off.
+    const shouldPersist = storage.getSettings().autoReconnect
+      || "pairingId" in linkParameters;
     let startedSession: Session | undefined;
 
     try {
@@ -232,22 +237,27 @@ export const createProvider = (
         message => onMessage(message, operation),
         {
           info: config?.info,
-          onConnectionParametersChange: (connection) => {
-            if (operation === generation && (!startedSession || session.get() === startedSession)) {
-              persistSession(connection);
-            }
-          },
+          onConnectionParametersChange: shouldPersist
+            ? (connection) => {
+                if (
+                  operation === currentOperation
+                  && (!startedSession || session.get() === startedSession)
+                ) {
+                  storage.setSession(connection);
+                }
+              }
+            : undefined,
         },
       );
 
       startedSession = next;
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
 
       setSession(next);
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
       unsubscribeSessionStatus?.();
       const onSessionStatusChange = () => {
-        if (operation !== generation || session.get() !== next) return;
+        if (operation !== currentOperation || session.get() !== next) return;
 
         if (next.status.get() !== SessionStatus.DISCONNECTED) return;
 
@@ -256,11 +266,11 @@ export const createProvider = (
 
         const reason = next.error.get();
 
-        if (!resetSessionIfCurrent(operation, reason)) return;
+        if (!didResetSession(operation, reason)) return;
 
         if (!reason || next._internal.isPairingInvalidated) clearSavedSession();
 
-        if (operation !== generation) return;
+        if (operation !== currentOperation) return;
 
         const disconnectError = new OxProvider.ProviderRpcError(
           4900,
@@ -277,9 +287,9 @@ export const createProvider = (
         unsubscribeSignalStatus();
       };
       setStatus(ProviderStatus.CONNECTING);
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
       await next.connect();
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
       log("session connected");
       log("session url", encodeConnectionURL(next.getHandshakeParameters()));
 
@@ -288,7 +298,7 @@ export const createProvider = (
           || state === SessionStatus.DISCONNECTED,
       );
 
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
 
       if (settled !== SessionStatus.CONNECTED) {
         throw new Error(next.error.get() ?? "Session failed to connect");
@@ -298,29 +308,24 @@ export const createProvider = (
         await next.send({ method: "eth_accounts", params: [] }),
       ) as Address[];
 
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
 
       const chainIdHex = unwrapSessionResponse(
         await next.send({ method: "eth_chainId", params: [] }),
       ) as string;
 
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
 
       setStatus(ProviderStatus.CONNECTED);
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
 
-      try {
-        persistSession(next.getConnectionParameters());
-      }
-      catch (error) {
-        log("could not persist session", error);
-      }
+      if (shouldPersist) storage.setSession(next.getConnectionParameters());
 
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
       oxEmitter.emit("connect", { chainId: chainIdHex });
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
       oxEmitter.emit("accountsChanged", accounts);
-      assertCurrent(operation);
+      assertCurrentOperation(operation);
 
       return next;
     }
@@ -329,10 +334,15 @@ export const createProvider = (
         ?? (error_ instanceof Error ? error_.message : "Connection failed");
 
       // Retry readiness probes with the latest counters, never a half-ready session.
-      if (resetSessionIfCurrent(operation, reason)) {
-        generation++;
+      if (didResetSession(operation, reason)) {
+        currentOperation++;
 
-        if (startedSession?._internal.isPairingInvalidated) clearSavedSession();
+        if (
+          startedSession?._internal.isPairingInvalidated
+          || (isRestoreAttempt && error_ instanceof InvalidSavedSessionError)
+        ) {
+          clearSavedSession();
+        }
       }
 
       try {
@@ -347,12 +357,12 @@ export const createProvider = (
   };
   const closeSession = async () => {
     const current = session.get();
-    const operation = ++generation;
+    const operation = ++currentOperation;
 
     restoringSession = undefined;
 
     try {
-      if (resetSessionIfCurrent(operation)) storage.clearSession();
+      if (didResetSession(operation)) storage.clearSession();
     }
     finally {
       await current?.close();
@@ -370,13 +380,13 @@ export const createProvider = (
 
     if (!saved) throw new Error("No saved session to restore");
 
-    const operation = ++generation;
+    const operation = ++currentOperation;
 
     const pending = (async () => {
       // Assign restoringSession before start notifies synchronous subscribers.
       await Promise.resolve();
 
-      return await start(saved, operation);
+      return await start(saved, operation, true);
     })();
 
     restoringSession = pending;
@@ -502,7 +512,7 @@ export const createProvider = (
     session,
   });
 
-  if (storage.getSettings().autoReconnect && storage.getSession()) {
+  if (hasRestorableSession(storage)) {
     void (async () => {
       try {
         await restoreSession();

@@ -46,6 +46,8 @@ export type SignalingHooks = {
   k: SymmetricKey;
   // Our capabilities, advertised to the peer during the handshake
   capabilities: PeerCapabilities;
+  // Peer capabilities saved before a resume, reused until the peer re-announces.
+  initialPeerCapabilities?: PeerCapabilities;
   // Decrypt using our private key
   decrypt: (message: string) => Promise<string>;
   // Encrypt to relying party
@@ -94,6 +96,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
     encrypt,
     decrypt,
     capabilities,
+    initialPeerCapabilities,
     h,
     k: handshakeKey,
     publicKey,
@@ -104,7 +107,7 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
 
   const [status, setStatus] = observable<Status>(Status.STANDBY);
   const [peerKey, setPeerKey] = observable<EncryptionKey | undefined>(undefined);
-  const [peerCapabilities, setPeerCapabilities] = observable<PeerCapabilities | undefined>(undefined);
+  const [peerCapabilities, setPeerCapabilities] = observable<PeerCapabilities | undefined>(initialPeerCapabilities);
 
   const emitter = new EventEmitter<SignalEventMap>();
   let isStopped = false;

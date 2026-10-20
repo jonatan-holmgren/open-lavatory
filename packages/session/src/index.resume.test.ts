@@ -1,5 +1,5 @@
-import { observable } from "@openlv/core";
-import { generateKeyPair } from "@openlv/core/encryption";
+import { observable, type SerializedEncryptionKey } from "@openlv/core";
+import { generateKeyPair, hashPublicKey } from "@openlv/core/encryption";
 import {
   type PeerCapabilities,
   type SignalingLayer,
@@ -25,7 +25,7 @@ const createSignalingLoader = (signaling: SignalingLayer) => {
 
 import { createSession } from "./index.js";
 
-it("invalidates saved state when its persisted transport is unavailable", async () => {
+it("keeps saved state when its persisted transport is unavailable", async () => {
   const local = await generateKeyPair();
   const peer = await generateKeyPair();
   const [signalStatus, setSignalStatus] = observable<SignalingStatus>(SignalingStatus.STANDBY);
@@ -52,14 +52,14 @@ it("invalidates saved state when its persisted transport is unavailable", async 
   };
   const savedParameters = {
     version: 1 as const,
-    sessionId: "session-id",
-    h: "0".repeat(32),
+    sessionId: "mytestsession111",
+    h: await hashPublicKey(local.encryptionKey),
     k: "0".repeat(32),
     p: "ntfy",
     s: "https://ntfy.sh/",
-    relyingPublicKey: peer.encryptionKey.toString(),
-    encryptionKey: local.encryptionKey.toString(),
-    decryptionKey: local.decryptionKey.toString(),
+    relyingPublicKey: peer.encryptionKey.toString() as SerializedEncryptionKey,
+    encryptionKey: local.encryptionKey.toString() as SerializedEncryptionKey,
+    decryptionKey: local.decryptionKey.toString() as SerializedEncryptionKey,
     pairingId: "pairing-id",
     transportId: "unsupported",
     lastCounter: 1,
@@ -74,5 +74,5 @@ it("invalidates saved state when its persisted transport is unavailable", async 
   );
 
   await expect(session.connect()).rejects.toThrow("No common transport with peer");
-  expect(session._internal.isPairingInvalidated).toBe(true);
+  expect(session._internal.isPairingInvalidated).toBe(false);
 });

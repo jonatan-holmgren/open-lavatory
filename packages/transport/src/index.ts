@@ -26,12 +26,19 @@ export type TLayerEventMap = {
   error: (reason?: string) => void;
 };
 
+/** Decrypted but unvalidated session envelope received over the transport. */
+export type IncomingMessage = {
+  type: string;
+  payload?: unknown;
+  messageId?: string;
+};
+
 export type TransportLayerParameters = {
   isHost: boolean;
   encrypt: EncryptionKey["encrypt"];
   decrypt: DecryptionKey["decrypt"];
   subsend: (message: TransportMessage) => Promise<void>;
-  onmessage: (message: { type: string; payload?: unknown; messageId?: string; }) => void;
+  onmessage: (message: IncomingMessage) => void;
 };
 
 /**
@@ -103,7 +110,7 @@ export const createTransportBase = (
       try {
         const data = await decrypt(message);
 
-        onmessage(JSON.parse(data) as { type: string; payload?: unknown; messageId?: string; });
+        onmessage(JSON.parse(data) as IncomingMessage);
       }
       catch (error) {
         log("dropping undecryptable transport message", error);

@@ -5,6 +5,10 @@ const { createProviderMock } = vi.hoisted(() => ({ createProviderMock: vi.fn() }
 
 vi.mock("@openlv/provider", () => ({
   createProvider: createProviderMock,
+  hasRestorableSession: (storage: {
+    getSettings: () => { autoReconnect: boolean; };
+    getSession: () => unknown;
+  }) => storage.getSettings().autoReconnect && storage.getSession() !== undefined,
   ProviderStatus: {
     STANDBY: "standby",
     CREATING: "creating",

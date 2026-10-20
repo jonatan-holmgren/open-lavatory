@@ -1,4 +1,9 @@
-import { isReplayCounter, OPENLV_PROTOCOL_VERSION } from "@openlv/core";
+import {
+  isReplayCounter,
+  OPENLV_PROTOCOL_VERSION,
+  SESSION_SETUP_TIMEOUT_MS,
+  type SessionResumeState,
+} from "@openlv/core";
 import type { EncryptionKey } from "@openlv/core/encryption";
 import {
   generateUrlSafeRandomString,
@@ -14,19 +19,21 @@ import type {
 import { log } from "./utils/log.js";
 
 const RESUME_CHALLENGE_LENGTH = 16;
-const RESUME_TIMEOUT_MS = 45_000;
+const MAX_PENDING_RESPONDER_ATTEMPTS = 8;
+
+type PendingResponder = {
+  key: EncryptionKey;
+  challenge: string;
+  initiatorCounter: number;
+  cancelTimeout: () => void;
+};
 
 /**
  * Outbound counters are persisted before publishing their frames. Inbound
  * replay counters are persisted only after the initiator proves possession of
  * the pinned key by returning the decrypted challenge.
  */
-export type SignalingResumeState = {
-  pairingId: string;
-  lastCounter: number;
-  lastSeenCounter: number;
-  lastSeenAckCounter: number;
-};
+export type SignalingResumeState = SessionResumeState;
 
 export type SignalingResumeConfig = SignalingResumeState & {
   // True when this peer should open the resume during setup; false when it
@@ -105,33 +112,22 @@ export const createResumeController = (
       cancelTimeout: () => void;
     }
     | undefined;
-  let pendingResponder:
-    | {
-      key: EncryptionKey;
-      challenge: string;
-      initiatorCounter: number;
-      cancelTimeout: () => void;
-    }
-    | undefined;
+  const pendingResponders = new Map<number, PendingResponder>();
 
   const clearInitiator = () => {
     pendingInitiator?.cancelTimeout();
     pendingInitiator = undefined;
   };
 
-  const clearResponder = () => {
-    pendingResponder?.cancelTimeout();
-    pendingResponder = undefined;
-  };
-  const highestSeenResumeCounter = () => Math.max(
-    state.lastSeenCounter,
-    pendingResponder?.initiatorCounter ?? state.lastSeenCounter,
-  );
+  const clearResponders = () => {
+    for (const responder of pendingResponders.values()) responder.cancelTimeout();
 
+    pendingResponders.clear();
+  };
   const teardown = () => {
     isStopped = true;
     clearInitiator();
-    clearResponder();
+    clearResponders();
   };
 
   const fail = (reason: string, isPairingInvalidated = false) => {
@@ -185,7 +181,7 @@ export const createResumeController = (
     if (isStopped) return;
 
     if (role === "initiator") clearInitiator();
-    else clearResponder();
+    else clearResponders();
 
     acceptPeerKey(key);
 
@@ -207,7 +203,7 @@ export const createResumeController = (
     persist({ ...state, lastCounter: counter });
     const challenge = generateUrlSafeRandomString(RESUME_CHALLENGE_LENGTH);
 
-    const timer = setTimeout(() => fail("Authenticated resume timed out"), RESUME_TIMEOUT_MS);
+    const timer = setTimeout(() => fail("Authenticated resume timed out"), SESSION_SETUP_TIMEOUT_MS);
 
     pendingInitiator = {
       challenge,
@@ -233,7 +229,7 @@ export const createResumeController = (
 
     const { payload } = message;
 
-    if (!isAdvancingCounter("resume", payload.counter, highestSeenResumeCounter())) return;
+    if (!isAdvancingCounter("resume", payload.counter, state.lastSeenCounter)) return;
 
     if (payload.pairingId !== state.pairingId) return;
 
@@ -241,9 +237,15 @@ export const createResumeController = (
 
     if (isStopped || !key) return;
 
-    // Another concurrently delivered resume may have advanced this counter
-    // while the pinned-key parser was awaiting.
-    if (!isAdvancingCounter("resume", payload.counter, highestSeenResumeCounter())) return;
+    // Another concurrently delivered resume may have advanced the committed
+    // counter while the pinned-key parser was awaiting.
+    if (!isAdvancingCounter("resume", payload.counter, state.lastSeenCounter)) return;
+
+    // Ignore duplicates without resetting a pending challenge or its timer.
+    if (pendingResponders.has(payload.counter)) return;
+
+    // Keep a bounded set so a replay cannot replace another in-flight proof.
+    if (pendingResponders.size >= MAX_PENDING_RESPONDER_ATTEMPTS) return;
 
     const responderCounter = nextCounter();
 
@@ -253,17 +255,20 @@ export const createResumeController = (
     persist({ ...state, lastCounter: responderCounter });
     const responderChallenge = generateUrlSafeRandomString(RESUME_CHALLENGE_LENGTH);
 
-    if (pendingResponder) log("resume replaced in-flight responder", state);
+    const timer = setTimeout(() => {
+      pendingResponders.delete(payload.counter);
 
-    clearResponder();
-    const timer = setTimeout(() => fail("Authenticated resume timed out awaiting challenge confirmation"), RESUME_TIMEOUT_MS);
+      if (pendingResponders.size === 0) {
+        fail("Authenticated resume timed out awaiting challenge confirmation");
+      }
+    }, SESSION_SETUP_TIMEOUT_MS);
 
-    pendingResponder = {
+    pendingResponders.set(payload.counter, {
       key,
       challenge: responderChallenge,
       initiatorCounter: payload.counter,
       cancelTimeout: () => clearTimeout(timer),
-    };
+    });
 
     await send({
       type: "resume-ack",
@@ -283,18 +288,22 @@ export const createResumeController = (
     if (isStopped) return;
 
     const { payload } = message;
-    const responder = pendingResponder;
+    let responder: PendingResponder | undefined;
+
+    for (const pending of pendingResponders.values()) {
+      if (pending.challenge === payload.challenge) {
+        responder = pending;
+        break;
+      }
+    }
 
     if (!responder) return;
 
     if (payload.pairingId !== state.pairingId) return;
 
-    if (payload.challenge !== responder.challenge) return;
-
-    // Only authenticated initiator counters become durable replay high-water marks.
     persist({
       ...state,
-      lastSeenCounter: responder.initiatorCounter,
+      lastSeenCounter: Math.max(state.lastSeenCounter, responder.initiatorCounter),
     });
     complete(responder.key, "responder");
   };

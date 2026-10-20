@@ -1,4 +1,8 @@
-import { parseSessionConnectionParameters, type SessionConnectionParameters } from "@openlv/core";
+import {
+  isObject,
+  parseSessionConnectionParameters,
+  type SessionConnectionParameters,
+} from "@openlv/core";
 import { EventEmitter } from "eventemitter3";
 
 import { DEFAULT_SETTINGS } from "./default.js";
@@ -6,6 +10,12 @@ import { parseProviderStorage, type ProviderStorage } from "./version.js";
 
 const DEFAULT_STORAGE_KEY = "@openlv/connector/settings";
 const SESSION_STORAGE_KEY = "@openlv/connector/session";
+const SESSION_STORAGE_VERSION = 1;
+
+type StoredSession = {
+  storageVersion: typeof SESSION_STORAGE_VERSION;
+  parameters: SessionConnectionParameters;
+};
 
 export type {
   ProviderStorage,
@@ -56,6 +66,17 @@ export type ProviderStorageR = {
   clearSession: () => void;
 };
 
+const parseStoredSession = (parsed: unknown): SessionConnectionParameters | undefined => {
+  if (isObject(parsed) && "storageVersion" in parsed) {
+    return parsed["storageVersion"] === SESSION_STORAGE_VERSION
+      ? parseSessionConnectionParameters(parsed["parameters"])
+      : undefined;
+  }
+
+  // Legacy records stored the parameters directly.
+  return parseSessionConnectionParameters(parsed);
+};
+
 export const createProviderStorage = ({
   storage,
   sessionStorage,
@@ -80,10 +101,15 @@ export const createProviderStorage = ({
 
     try {
       const parsed: unknown = JSON.parse(raw);
+      const parameters = parseStoredSession(parsed);
 
-      return parseSessionConnectionParameters(parsed);
+      if (!parameters) sessionIo.removeItem(SESSION_STORAGE_KEY);
+
+      return parameters;
     }
     catch {
+      sessionIo.removeItem(SESSION_STORAGE_KEY);
+
       return undefined;
     }
   };
@@ -98,7 +124,12 @@ export const createProviderStorage = ({
     },
     getSession: readSession,
     setSession: (parameters: SessionConnectionParameters) => {
-      sessionIo.setItem(SESSION_STORAGE_KEY, JSON.stringify(parameters));
+      const stored: StoredSession = {
+        storageVersion: SESSION_STORAGE_VERSION,
+        parameters,
+      };
+
+      sessionIo.setItem(SESSION_STORAGE_KEY, JSON.stringify(stored));
     },
     clearSession: () => {
       sessionIo.removeItem(SESSION_STORAGE_KEY);

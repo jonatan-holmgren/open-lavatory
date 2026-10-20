@@ -5,6 +5,7 @@ import type { SessionLinkParameters } from "../session.js";
 import { fromBase64, toBase64 } from "./base64.js";
 
 const PUBLIC_KEY_BYTES = 32;
+const SECRET_KEY_BYTES = 32;
 const NONCE_BYTES = 24;
 
 const composePayload = (
@@ -98,9 +99,9 @@ export const parseEncryptionKey = async (
 export const createDecryptionKey = async (
   secretKey: Uint8Array,
 ): Promise<DecryptionKey> => {
-  if (secretKey.length !== PUBLIC_KEY_BYTES) {
+  if (secretKey.length !== SECRET_KEY_BYTES) {
     throw new Error(
-      `Private key must be ${PUBLIC_KEY_BYTES} bytes, got ${secretKey.length}`,
+      `Private key must be ${SECRET_KEY_BYTES} bytes, got ${secretKey.length}`,
     );
   }
 
@@ -128,6 +129,20 @@ export const createDecryptionKey = async (
 export const parseDecryptionKey = async (
   serializedKey: string,
 ): Promise<DecryptionKey> => await createDecryptionKey(fromBase64(serializedKey));
+
+/** Decode a serialized key and check that it is 32 bytes. */
+export const isSerializedKey = (value: string): boolean => {
+  try {
+    return fromBase64(value).length === PUBLIC_KEY_BYTES;
+  }
+  catch {
+    return false;
+  }
+};
+
+/** Derive the base64 public key from a serialized X25519 secret key. */
+export const serializedPublicKey = (serializedSecret: string): string =>
+  toBase64(x25519.getPublicKey(fromBase64(serializedSecret)));
 
 export type EncKeypair = {
   encryptionKey: EncryptionKey;

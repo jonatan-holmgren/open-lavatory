@@ -1,4 +1,4 @@
-import type { TransportLayer, TransportMessage } from "@openlv/transport";
+import type { IncomingMessage, TransportLayer, TransportMessage } from "@openlv/transport";
 import type { EventEmitter } from "eventemitter3";
 
 import type { SessionEvents } from "../events.js";
@@ -25,11 +25,7 @@ export type SessionMessagingContext = {
 };
 
 export type SessionMessaging = {
-  handleTransportMessage: (message: {
-    type: string;
-    payload?: unknown;
-    messageId?: string;
-  }) => Promise<void>;
+  handleTransportMessage: (message: IncomingMessage) => Promise<void>;
   handleSignalMessage: (message: object) => Promise<void>;
   flushNegotiation: () => Promise<void>;
   clearNegotiation: () => void;
@@ -69,13 +65,12 @@ export const createSessionMessaging = (
   context: SessionMessagingContext,
 ): SessionMessaging => {
   const { messages, getTransport, isTransportReady, isStopped, close } = context;
+  const MAX_PENDING_NEGOTIATION = 32;
   let pendingNegotiation: TransportMessage[] = [];
 
-  const handleTransportMessage = async (message: {
-    type: string;
-    payload?: unknown;
-    messageId?: string;
-  }): Promise<void> => {
+  const handleTransportMessage = async (
+    message: IncomingMessage,
+  ): Promise<void> => {
     if (isStopped()) return;
 
     const current = getTransport();
@@ -115,6 +110,11 @@ export const createSessionMessaging = (
       const current = getTransport();
 
       if (!current || !isTransportReady()) {
+        if (pendingNegotiation.length >= MAX_PENDING_NEGOTIATION) {
+          log("dropping oldest buffered negotiation message");
+          pendingNegotiation.shift();
+        }
+
         pendingNegotiation.push(negotiationMessage);
 
         return;

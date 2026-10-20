@@ -115,6 +115,62 @@ describe("authenticated signaling resume", () => {
     expect(failures).toEqual([]);
   });
 
+  it("preserves a newer pending challenge when a stale resume is replayed", async () => {
+    const sent: SignalMessage[] = [];
+    const { controller, peer, saved, resumed } = await setup({
+      send: async (message) => {
+        sent.push(message as SignalMessage);
+      },
+    });
+
+    await controller.handleResume(frame(6, peer.encryptionKey.toString()));
+    await controller.handleResume(frame(5, peer.encryptionKey.toString()));
+
+    const newerAck = sent.find(
+      (message): message is SignalMessageResumeAck =>
+        message.type === "resume-ack"
+        && message.payload.initiatorChallenge === "challenge-6",
+    );
+
+    if (!newerAck) throw new Error("newer resume ack was not sent");
+
+    await controller.handleResumeConfirm({
+      type: "resume-confirm",
+      payload: { pairingId, challenge: newerAck.payload.challenge },
+      timestamp: 0,
+    });
+
+    expect(saved.at(-1)?.lastSeenCounter).toBe(6);
+    expect(resumed).toContain("resumed");
+  });
+
+  it("does not let an unconfirmed high counter hide the genuine resume", async () => {
+    const sent: SignalMessage[] = [];
+    const { controller, peer, saved } = await setup({
+      send: async (message) => {
+        sent.push(message as SignalMessage);
+      },
+    });
+
+    await controller.handleResume(frame(100, peer.encryptionKey.toString()));
+    await controller.handleResume(frame(5, peer.encryptionKey.toString()));
+
+    const acks = sent.filter(
+      (message): message is SignalMessageResumeAck => message.type === "resume-ack",
+    );
+
+    expect(acks).toHaveLength(2);
+    expect(acks.at(-1)?.payload.initiatorChallenge).toBe("challenge-5");
+
+    await controller.handleResumeConfirm({
+      type: "resume-confirm",
+      payload: { pairingId, challenge: acks.at(-1)!.payload.challenge },
+      timestamp: 0,
+    });
+
+    expect(saved.at(-1)?.lastSeenCounter).toBe(5);
+  });
+
   it("does not publish an ack when advancing counter persistence fails", async () => {
     const send = vi.fn(async () => {});
     const { controller, peer, failures } = await setup({

@@ -2,6 +2,10 @@ import type { SessionHandshakeParameters } from "../session.js";
 
 export const OPENLV_PROTOCOL_VERSION = 1;
 
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/;
+export const PUBLIC_KEY_HASH_PATTERN = /^[0-9a-f]{16}$/;
+export const HANDSHAKE_KEY_PATTERN = /^[0-9a-f]{32}$/;
+
 export const encodeConnectionURL = (payload: SessionHandshakeParameters) => {
   const parameters = new URLSearchParams();
 
@@ -41,42 +45,43 @@ export const decodeConnectionURL = (
       );
     }
 
-    const h = urlObject.searchParams.get("h") || "";
-    const k = urlObject.searchParams.get("k") || "";
-    const s = urlObject.searchParams.get("s") || undefined;
-
-    const p = urlObject.searchParams.get("p") || "";
-
     if (!sessionId) {
       throw new Error("Session ID is required in URL");
     }
 
     // Validate session ID format (16 characters, URL-safe alphabet)
-    if (!/^[A-Za-z0-9_-]{16}$/.test(sessionId)) {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
       throw new Error(
         "Invalid session ID format: must be 16 URL-safe characters",
       );
     }
+
+    const h = urlObject.searchParams.get("h") || "";
 
     if (!h) {
       throw new Error("Public key hash (h parameter) is required in URL");
     }
 
     // Validate public key hash format (16 hex characters)
-    if (!/^[0-9a-f]{16}$/.test(h)) {
+    if (!PUBLIC_KEY_HASH_PATTERN.test(h)) {
       throw new Error(
         "Invalid public key hash format: must be 16 hex characters",
       );
     }
+
+    const k = urlObject.searchParams.get("k") || "";
 
     if (!k) {
       throw new Error("Shared key (k parameter) is required in URL");
     }
 
     // Validate shared key format (32 hex characters)
-    if (!/^[0-9a-f]{32}$/.test(k)) {
+    if (!HANDSHAKE_KEY_PATTERN.test(k)) {
       throw new Error("Invalid shared key format: must be 32 lowercase hex characters");
     }
+
+    const s = urlObject.searchParams.get("s") || undefined;
+    const p = urlObject.searchParams.get("p") || "";
 
     return {
       version,
@@ -94,6 +99,8 @@ export const decodeConnectionURL = (
     // Strip query string so handshake secrets (k) are not exposed in error messages
     const safeUrl = url.includes("?") ? url.slice(0, url.indexOf("?")) + "?[redacted]" : url;
 
-    throw new Error(`Failed to parse URL: ${safeUrl}. Original error: ${errorMessage}`);
+    throw new Error(`Failed to parse URL: ${safeUrl}. Original error: ${errorMessage}`, {
+      cause: error,
+    });
   }
 };

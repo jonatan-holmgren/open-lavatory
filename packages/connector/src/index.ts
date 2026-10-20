@@ -1,6 +1,7 @@
 import type { OpenLVModalElementProperties } from "@openlv/modal";
 import {
   createProvider,
+  hasRestorableSession,
   type OpenLVProvider,
   type OpenLVProviderParameters,
   ProviderStatus,
@@ -123,7 +124,7 @@ export const openlv = ({
       async isAuthorized() {
         log("isAuthorized");
 
-        if (provider.storage.getSettings().autoReconnect && provider.storage.getSession()) {
+        if (hasRestorableSession(provider.storage)) {
           await provider.status.until(providerStatus =>
             providerStatus === ProviderStatus.CONNECTED
             || providerStatus === ProviderStatus.ERROR,

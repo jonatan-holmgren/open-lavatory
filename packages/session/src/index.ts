@@ -1,13 +1,17 @@
 /* eslint-disable max-lines */
 import {
   decodeConnectionURL,
+  type Observable,
   observable,
   OPENLV_PROTOCOL_VERSION,
   parseSessionConnectionParameters,
-  type Observable,
+  type SerializedEncryptionKey,
+  SESSION_CONNECTION_PARAMETER_KEYS,
+  SESSION_SETUP_TIMEOUT_MS,
   type SessionConnectionParameters,
   type SessionHandshakeParameters,
   type SessionLinkParameters,
+  validateSessionConnectionKeys,
 } from "@openlv/core";
 import {
   deriveSymmetricKey,
@@ -50,6 +54,13 @@ export const SessionStatus = {
   DISCONNECTED: "disconnected",
 } as const;
 export type SessionStatus = (typeof SessionStatus)[keyof typeof SessionStatus];
+
+export class InvalidSavedSessionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidSavedSessionError";
+  }
+}
 
 export type SessionOptions = {
   info?: PeerInfo;
@@ -107,22 +118,24 @@ export const createSession = async (
   }
 
   const savedConnection = parseSessionConnectionParameters(initParameters);
-  const hasConnectionMaterial
-    = "encryptionKey" in initParameters
-      || "decryptionKey" in initParameters
-      || "relyingPublicKey" in initParameters
-      || "pairingId" in initParameters
-      || "transportId" in initParameters
-      || "lastCounter" in initParameters
-      || "lastSeenCounter" in initParameters
-      || "lastSeenAckCounter" in initParameters;
+  const hasConnectionMaterial = SESSION_CONNECTION_PARAMETER_KEYS.some(
+    key => Object.hasOwn(initParameters, key),
+  );
 
   if (hasConnectionMaterial && !savedConnection) {
-    throw new Error("Invalid saved session. Request a fresh pairing URI and try again.");
+    throw new InvalidSavedSessionError(
+      "Invalid saved session. Request a fresh pairing URI and try again.",
+    );
   }
 
   if (savedConnection && !options?.onConnectionParametersChange) {
     throw new Error("Resuming a saved session requires durable connection parameter persistence");
+  }
+
+  if (savedConnection && !await validateSessionConnectionKeys(savedConnection)) {
+    throw new InvalidSavedSessionError(
+      "Saved session key material is inconsistent. Request a fresh pairing URI and try again.",
+    );
   }
 
   const emitter = new EventEmitter<SessionEvents>();
@@ -168,6 +181,10 @@ export const createSession = async (
     lastSeenAckCounter: savedConnection?.lastSeenAckCounter ?? 0,
   };
   const isResuming = savedConnection !== undefined;
+  // Either side may be the one that reloaded, so both must be able to initiate.
+  // Simultaneous resumes are de-duplicated by the pairing counter and challenge
+  // state machine, and completing either direction marks the session resumed.
+  const shouldInitiateResume = isResuming;
   let selectedTransportId = savedConnection?.transportId;
   const persistResumeState = (state: SignalingResumeState) => {
     options?.onConnectionParametersChange?.(buildConnectionParameters(state));
@@ -215,11 +232,12 @@ export const createSession = async (
     expectedPeerKey: relyingEncryptionKey,
     resume: {
       ...resumeState,
-      initiate: isResuming,
+      initiate: shouldInitiateResume,
       persist: persistResumeState,
     },
     k: handshakeKey,
     capabilities,
+    initialPeerCapabilities: savedConnection?.peerCapabilities,
     isHost,
   });
   const buildConnectionParameters = (
@@ -237,11 +255,12 @@ export const createSession = async (
 
     return {
       ...handshakeParameters,
-      relyingPublicKey: relyingPublicKey.toString(),
-      encryptionKey: encryptionKey.toString(),
-      decryptionKey: decryptionKey.toString(),
+      relyingPublicKey: relyingPublicKey.toString() as SerializedEncryptionKey,
+      encryptionKey: encryptionKey.toString() as SerializedEncryptionKey,
+      decryptionKey: decryptionKey.toString() as SerializedEncryptionKey,
       ...state,
       transportId: selectedTransportId,
+      peerCapabilities: signal.peerCapabilities.get() ?? savedConnection?.peerCapabilities,
     };
   };
 
@@ -254,8 +273,7 @@ export const createSession = async (
   let isTransportReady = false;
 
   // Bound resumed setup immediately, but allow fresh hosts to advertise until a peer joins.
-  const TRANSPORT_LINK_TIMEOUT_MS = 45_000;
-  let linkDeadline: ReturnType<typeof setTimeout> | undefined;
+  let linkDeadline: number | undefined;
   let unsubscribeTransportStatus: (() => void) | undefined;
   let unsubscribeSignalStatus: (() => void) | undefined;
   let isStopped = false;
@@ -338,8 +356,7 @@ export const createSession = async (
 
       if (isResuming) {
         log("session resumption failed to complete in time");
-        isPairingInvalidated = true;
-        setLastErrorIfUnset("Session resumption timed out. Request a fresh pairing URI and try again.");
+        setLastErrorIfUnset("Session resumption timed out. Retry or request a fresh pairing URI.");
       }
       else {
         log("transport failed to connect in time");
@@ -347,7 +364,7 @@ export const createSession = async (
       }
 
       void teardown();
-    }, TRANSPORT_LINK_TIMEOUT_MS);
+    }, SESSION_SETUP_TIMEOUT_MS);
   };
 
   const onTransportSetupError = (error: unknown) => {
@@ -376,9 +393,6 @@ export const createSession = async (
 
     if (!layer) {
       log("no common transport with peer", capabilities.transports, peerCapabilities?.transports);
-
-      if (isResuming) isPairingInvalidated = true;
-
       setLastErrorIfUnset("No common transport with peer");
       await teardown();
 
@@ -484,7 +498,7 @@ export const createSession = async (
               return;
             }
 
-            if (isResuming) {
+            if (shouldInitiateResume) {
               await signal.resume();
             }
           })(),
