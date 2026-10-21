@@ -113,6 +113,10 @@ export const createResumeController = (
     }
     | undefined;
   const pendingResponders = new Map<number, PendingResponder>();
+  // Deduplicate both directions of one in-flight exchange, not later resumes.
+  const beginNewExchange = () => {
+    if (!pendingInitiator && pendingResponders.size === 0) didResume = false;
+  };
 
   const clearInitiator = () => {
     pendingInitiator?.cancelTimeout();
@@ -196,6 +200,8 @@ export const createResumeController = (
 
     if (pendingInitiator) return;
 
+    beginNewExchange();
+
     const counter = nextCounter();
 
     if (counter === undefined) throw new Error(failureReason);
@@ -243,6 +249,8 @@ export const createResumeController = (
 
     // Ignore duplicates without resetting a pending challenge or its timer.
     if (pendingResponders.has(payload.counter)) return;
+
+    beginNewExchange();
 
     // Keep a bounded set so a replay cannot replace another in-flight proof.
     if (pendingResponders.size >= MAX_PENDING_RESPONDER_ATTEMPTS) return;

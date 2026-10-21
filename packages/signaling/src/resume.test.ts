@@ -254,4 +254,32 @@ describe("authenticated signaling resume", () => {
     expect(resumed.filter(value => value === peer.encryptionKey.toString())).toHaveLength(2);
     expect(resumed.filter(value => value === "resumed")).toHaveLength(1);
   });
+  it("signals every new inbound resume so a live peer renegotiates after repeated reloads", async () => {
+    const sent: SignalMessage[] = [];
+    const { controller, peer, resumed } = await setup({
+      send: async (message) => {
+        sent.push(message as SignalMessage);
+      },
+    });
+
+    for (const counter of [3, 4]) {
+      await controller.handleResume(frame(counter, peer.encryptionKey.toString()));
+      let ack: SignalMessageResumeAck | undefined;
+
+      for (const message of sent) {
+        if (message.type === "resume-ack") ack = message;
+      }
+
+      if (!ack) throw new Error("resume acknowledgement was not sent");
+
+      await controller.handleResumeConfirm({
+        type: "resume-confirm",
+        payload: { pairingId, challenge: ack.payload.challenge },
+        timestamp: 0,
+      });
+    }
+
+    expect(resumed.filter(value => value === "resumed")).toHaveLength(2);
+    controller.teardown();
+  });
 });

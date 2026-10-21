@@ -322,7 +322,11 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
       log("Dropping frame with unknown prefix");
     }
     catch (error) {
-      if (!isStopped) fail(`Signaling authentication failed: ${error instanceof Error ? error.message : String(error)}; pair again`, true);
+      if (!isStopped) {
+        const reason = error instanceof Error ? error.message : String(error);
+
+        fail(`Signaling message handling failed: ${reason}`);
+      }
     }
   };
 

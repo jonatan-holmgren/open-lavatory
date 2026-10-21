@@ -305,7 +305,10 @@ export const TryItOut = () => {
   const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
-    Object.assign(globalThis, { OPENLV_DEBUG: true });
+    const debugGlobal = globalThis as typeof globalThis & { OPENLV_DEBUG?: boolean; };
+
+    debugGlobal.OPENLV_DEBUG ??= true;
+
     setIsMounted(true);
   }, []);
 

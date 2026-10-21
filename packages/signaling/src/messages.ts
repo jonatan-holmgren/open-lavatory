@@ -176,6 +176,12 @@ export const parseSignalMessage = (raw: string): SignalMessage | undefined => {
 
   if (!isObject(parsed)) return undefined;
 
+  const timestamp = parsed["timestamp"];
+
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp)) {
+    return undefined;
+  }
+
   const message = parsed;
 
   switch (message["type"]) {
@@ -200,7 +206,7 @@ export const parseSignalMessage = (raw: string): SignalMessage | undefined => {
       return {
         type: "capabilities",
         payload: capabilities,
-        timestamp: message["timestamp"] as number,
+        timestamp,
       };
     }
     case "data": {
@@ -216,7 +222,7 @@ export const parseSignalMessage = (raw: string): SignalMessage | undefined => {
       return {
         type: "resume",
         payload,
-        timestamp: message["timestamp"] as number,
+        timestamp,
       };
     }
     case "resume-ack": {
@@ -227,7 +233,7 @@ export const parseSignalMessage = (raw: string): SignalMessage | undefined => {
       return {
         type: "resume-ack",
         payload,
-        timestamp: message["timestamp"] as number,
+        timestamp,
       };
     }
     case "resume-confirm": {
@@ -238,7 +244,7 @@ export const parseSignalMessage = (raw: string): SignalMessage | undefined => {
       return {
         type: "resume-confirm",
         payload,
-        timestamp: message["timestamp"] as number,
+        timestamp,
       };
     }
     default: {
