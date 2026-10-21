@@ -1,5 +1,6 @@
 import { bytesToHex } from "@noble/ciphers/utils.js";
 
+import { fromBase64 } from "./base64.js";
 import type { EncryptionKey } from "./asymmetric.js";
 
 const HASH_LENGTH = 16;
@@ -10,7 +11,7 @@ const HASH_LENGTH = 16;
 export const hashPublicKey = async (
   publicKey: EncryptionKey,
 ): Promise<string> => {
-  const buffer = new TextEncoder().encode(publicKey.toString());
+  const buffer = fromBase64(publicKey.toString()).buffer;
   const hash = await crypto.subtle.digest("SHA-256", buffer);
 
   return bytesToHex(new Uint8Array(hash)).slice(0, HASH_LENGTH);

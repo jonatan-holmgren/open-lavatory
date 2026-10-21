@@ -69,7 +69,7 @@ Carries a peer's encryption public key. Sent twice per handshake:
 }
 ```
 
-The client verifies the host's key against the `h` parameter from the session URI (`SHA-256` of the serialized key, truncated to 16 hex chars).
+The client verifies the host's key against the `h` parameter from the session URI (`SHA-256` of the 32 raw X25519 public-key bytes, truncated to the first 16 lowercase hex chars).
 A mismatch aborts the handshake — it means the relay (or another party on the topic) attempted to substitute a key.
 
 ### `capabilities`
