@@ -19,18 +19,16 @@ vi.mock("./dynamic.js", () => ({
   loadTransport: vi.fn(),
 }));
 
-const createSignalingLoader = (signaling: SignalingLayer) => {
-  const createSignal = async () => signaling;
-  const createChannel = async () => createSignal;
-
-  return async () => createChannel;
-};
-
 import { createSession, SessionStatus } from "./index.js";
 
-const createConnectedSession = async () => {
+const createConnectedSession = async (options: {
+  setup?: () => Promise<void>;
+  teardown?: () => Promise<void>;
+} = {}) => {
   const sent: object[] = [];
-  const teardownTransport = vi.fn(async () => {});
+  const teardownTransport = vi.fn(async () => {
+    await options.teardown?.();
+  });
   let receive: ((message: { type: string; payload?: unknown; messageId?: string; }) => void) | undefined;
 
   const [transportStatus, setTransportStatus] = observable<TransportStatus>(TransportStatus.STANDBY);
@@ -54,7 +52,9 @@ const createConnectedSession = async () => {
     send: vi.fn(async () => {}),
   }) as unknown as SignalingLayer;
 
-  loadSignaling.mockImplementation(createSignalingLoader(signaling));
+  const createSignal = async () => signaling;
+
+  loadSignaling.mockResolvedValue(async () => createSignal);
 
   const transport: TransportLayerFunction = {
     transportId: "wrtc",
@@ -63,8 +63,10 @@ const createConnectedSession = async () => {
 
       return {
         type: "wrtc",
-        setup: async () => { setTransportStatus(TransportStatus.CONNECTED); },
-        renegotiate: async () => {},
+        setup: async () => {
+          await options.setup?.();
+          setTransportStatus(TransportStatus.CONNECTED);
+        },
         teardown: teardownTransport,
         send: async (message) => { sent.push(message); },
         handle: async () => {},
@@ -83,27 +85,90 @@ const createConnectedSession = async () => {
   await session.connect();
   await session.status.until(status => status === SessionStatus.CONNECTED);
 
-  return { session, sent, receive, teardownTransport };
+  return { session, signaling, sent, receive, teardownTransport, setTransportStatus };
 };
 
 describe("session close envelope", () => {
   it("sends an unacknowledged close before local teardown", async () => {
     const { session, sent, teardownTransport } = await createConnectedSession();
 
+    const closed = vi.fn();
+
+    session.emitter.on("close", closed);
     await session.close();
 
     expect(sent).toEqual([{ type: "close" }]);
     expect(teardownTransport).toHaveBeenCalledOnce();
     expect(session.status.get()).toBe(SessionStatus.DISCONNECTED);
+    await session.close({ notifyPeer: false });
+    expect(closed).toHaveBeenCalledExactlyOnceWith(undefined, false);
   });
 
   it("tears down on a received close without sending an acknowledgement", async () => {
     const { session, sent, receive, teardownTransport } = await createConnectedSession();
 
     receive?.({ type: "close" });
-    await session.status.until(status => status === SessionStatus.DISCONNECTED);
+    await session.close({ notifyPeer: false });
 
     expect(sent).toEqual([]);
     expect(teardownTransport).toHaveBeenCalledOnce();
+  });
+
+  it("keeps transport interruptions recoverable without emitting terminal closure", async () => {
+    const { session, signaling, setTransportStatus } = await createConnectedSession();
+    const closed = vi.fn();
+
+    session.emitter.on("close", closed);
+    setTransportStatus(TransportStatus.ERROR);
+    expect(session.status.get()).toBe(SessionStatus.DISCONNECTED);
+    expect(closed).not.toHaveBeenCalled();
+
+    signaling.emit("resume");
+    await session.status.until(status => status === SessionStatus.CONNECTED);
+    expect(closed).not.toHaveBeenCalled();
+    await session.close({ notifyPeer: false });
+    expect(closed).toHaveBeenCalledExactlyOnceWith(undefined, false);
+  });
+
+  it.each(["setup", "teardown"])("does not revive a closed transport during pending %s", async (phase) => {
+    let release!: () => void;
+    let started!: () => void;
+    // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+    const reached = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let isRestarting = false;
+    let isActive = false;
+    const pause = async (currentPhase: string) => {
+      if (!isRestarting || currentPhase !== phase) return;
+
+      isRestarting = false;
+      started();
+      await blocked;
+    };
+    const { session, signaling } = await createConnectedSession({
+      setup: async () => {
+        await pause("setup");
+        isActive = true;
+      },
+      teardown: async () => {
+        await pause("teardown");
+        isActive = false;
+      },
+    });
+
+    isRestarting = true;
+    signaling.emit("resume");
+    await reached;
+    const closing = session.close({ notifyPeer: false });
+
+    release();
+    await closing;
+    expect(isActive).toBe(false);
+    expect(session.status.get()).toBe(SessionStatus.DISCONNECTED);
   });
 });

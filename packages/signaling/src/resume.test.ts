@@ -3,7 +3,7 @@ import { generateKeyPair } from "@openlv/core/encryption";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SignalMessage, SignalMessageResume, SignalMessageResumeAck, SignalMessageResumeConfirm } from "./messages.js";
-import type { SignalingResumeState } from "./resume.js";
+import type { ResumeController, SignalingResumeState } from "./resume.js";
 import { createResumeController } from "./resume.js";
 
 const pairingId = "pairing";
@@ -254,6 +254,177 @@ describe("authenticated signaling resume", () => {
     expect(resumed.filter(value => value === peer.encryptionKey.toString())).toHaveLength(2);
     expect(resumed.filter(value => value === "resumed")).toHaveLength(1);
   });
+
+  it("deduplicates an inbound confirmation while the outbound confirmation is still publishing", async () => {
+    const sent: SignalMessage[] = [];
+    let releaseConfirm!: () => void;
+    let reportConfirm!: () => void;
+    // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+    const confirmPending = new Promise<void>((resolve) => {
+      releaseConfirm = resolve;
+    });
+    // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+    const confirmPublished = new Promise<void>((resolve) => {
+      reportConfirm = resolve;
+    });
+    const { controller, peer, saved, resumed } = await setup({
+      send: async (message) => {
+        const sentMessage = message as SignalMessage;
+
+        sent.push(sentMessage);
+
+        if (sentMessage.type === "resume-confirm") {
+          reportConfirm();
+          await confirmPending;
+        }
+      },
+    });
+
+    try {
+      await controller.resume();
+      await controller.handleResume(frame(3, peer.encryptionKey.toString()));
+      const outgoing = sent.find((message): message is SignalMessageResume => message.type === "resume");
+      const inboundAck = sent.find((message): message is SignalMessageResumeAck => message.type === "resume-ack");
+
+      if (!outgoing || !inboundAck) throw new Error("Resume frames were not sent");
+
+      const completing = controller.handleResumeAck({
+        type: "resume-ack",
+        payload: {
+          version: OPENLV_PROTOCOL_VERSION,
+          pairingId,
+          publicKey: peer.encryptionKey.toString(),
+          challenge: "peer-challenge",
+          initiatorChallenge: outgoing.payload.challenge,
+          counter: 4,
+        },
+        timestamp: 0,
+      });
+
+      await confirmPublished;
+      expect(saved.at(-1)?.lastSeenAckCounter).toBe(4);
+      await controller.handleResumeConfirm({
+        type: "resume-confirm",
+        payload: { pairingId, challenge: inboundAck.payload.challenge },
+        timestamp: 0,
+      });
+      expect(saved.at(-1)?.lastSeenCounter).toBe(3);
+      expect(resumed.filter(value => value === "resumed")).toHaveLength(0);
+
+      releaseConfirm();
+      await completing;
+      expect(resumed.filter(value => value === "resumed")).toHaveLength(1);
+    }
+    finally {
+      releaseConfirm();
+      controller.teardown();
+    }
+  });
+
+  // A/B name the initiating peer's three-frame exchange, not the sender.
+  // These are all orderings that preserve resume -> ack -> confirm per exchange.
+  it.each([
+    "AAABBB", "AABABB", "AABBAB", "AABBBA", "ABAABB",
+    "ABABAB", "ABABBA", "ABBAAB", "ABBABA", "ABBBAA",
+    "BAAABB", "BAABAB", "BAABBA", "BABAAB", "BABABA",
+    "BABBAA", "BBAAAB", "BBAABA", "BBABAA", "BBBAAA",
+  ])("notifies both peers once for simultaneous resumes and again after reload (%s)", async (deliveryOrder) => {
+    const keys = await Promise.all([generateKeyPair(), generateKeyPair()]);
+    const initialState = { pairingId, lastCounter: 0, lastSeenCounter: 0, lastSeenAckCounter: 0 };
+    const persisted: [SignalingResumeState, SignalingResumeState] = [initialState, initialState];
+    const resumed = [vi.fn(), vi.fn()] as const;
+    const failures = [vi.fn(), vi.fn()] as const;
+
+    type QueuedFrame = {
+      recipient: 0 | 1;
+      message: SignalMessageResume | SignalMessageResumeAck | SignalMessageResumeConfirm;
+    };
+    const exchanges: [QueuedFrame[], QueuedFrame[]] = [[], []];
+    const createPeer = (index: 0 | 1): ResumeController => {
+      const peerIndex = index === 0 ? 1 : 0;
+
+      return createResumeController({
+        config: {
+          ...persisted[index],
+          initiate: true,
+          persist: (state) => {
+            persisted[index] = state;
+          },
+        },
+        publicKey: keys[index].encryptionKey,
+        expectedPeerKey: keys[peerIndex].encryptionKey,
+        getPeerKey: () => undefined,
+        acceptPeerKey: vi.fn(),
+        onResumed: resumed[index],
+        onFailure: failures[index],
+        send: async (message) => {
+          const exchange = message.type === "resume-ack" ? peerIndex : index;
+
+          exchanges[exchange].push({ recipient: peerIndex, message });
+        },
+      });
+    };
+    const controllers: [ResumeController, ResumeController] = [createPeer(0), createPeer(1)];
+    const deliver = async (exchange: string) => {
+      const queued = exchanges[exchange === "A" ? 0 : 1].shift();
+
+      if (!queued) throw new Error(`No queued frame for exchange ${exchange}`);
+
+      const receiver = controllers[queued.recipient];
+
+      switch (queued.message.type) {
+        case "resume": {
+          await receiver.handleResume(queued.message);
+          break;
+        }
+        case "resume-ack": {
+          await receiver.handleResumeAck(queued.message);
+          break;
+        }
+        case "resume-confirm": {
+          await receiver.handleResumeConfirm(queued.message);
+          break;
+        }
+      }
+    };
+
+    try {
+      await Promise.all(controllers.map(controller => controller.resume()));
+      const initialResume = exchanges[0][0]?.message;
+
+      if (initialResume?.type !== "resume") throw new Error("Initial resume was not queued");
+
+      for (const exchange of deliveryOrder) await deliver(exchange);
+
+      expect(exchanges).toEqual([[], []]);
+      expect(resumed[0]).toHaveBeenCalledTimes(1);
+      expect(resumed[1]).toHaveBeenCalledTimes(1);
+      expect(persisted[0].lastSeenCounter).toBe(1);
+      expect(persisted[1].lastSeenCounter).toBe(1);
+
+      // Reload only B: A remains live, and B must retain its replay high-water.
+      controllers[1].teardown();
+      controllers[1] = createPeer(1);
+      await controllers[1].handleResume(initialResume);
+      expect(exchanges).toEqual([[], []]);
+      expect(resumed[1]).toHaveBeenCalledTimes(1);
+
+      await controllers[1].resume();
+
+      for (const exchange of "BBB") await deliver(exchange);
+
+      expect(exchanges).toEqual([[], []]);
+      expect(resumed[0]).toHaveBeenCalledTimes(2);
+      expect(resumed[1]).toHaveBeenCalledTimes(2);
+      expect(failures[0]).not.toHaveBeenCalled();
+      expect(failures[1]).not.toHaveBeenCalled();
+    }
+    finally {
+      controllers[0].teardown();
+      controllers[1].teardown();
+    }
+  });
+
   it("signals every new inbound resume so a live peer renegotiates after repeated reloads", async () => {
     const sent: SignalMessage[] = [];
     const { controller, peer, resumed } = await setup({

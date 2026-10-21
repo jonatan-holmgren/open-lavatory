@@ -1,4 +1,4 @@
-import { observable, type SerializedEncryptionKey } from "@openlv/core";
+import { observable, type SerializedEncryptionKey, type SessionConnectionParameters } from "@openlv/core";
 import { generateKeyPair, hashPublicKey } from "@openlv/core/encryption";
 import {
   type PeerCapabilities,
@@ -16,18 +16,57 @@ vi.mock("./dynamic.js", () => ({
   loadTransport: vi.fn(),
 }));
 
-const createSignalingLoader = (signaling: SignalingLayer) => {
-  const createSignal = async () => signaling;
-  const createChannel = async () => createSignal;
+import { createSession, InvalidSavedSessionError } from "./index.js";
 
-  return async () => createChannel;
-};
-
-import { createSession } from "./index.js";
-
-it("keeps saved state when its persisted transport is unavailable", async () => {
+const createSavedState = async () => {
   const local = await generateKeyPair();
   const peer = await generateKeyPair();
+  const parameters: SessionConnectionParameters = {
+    version: 1,
+    sessionId: "mytestsession111",
+    h: await hashPublicKey(local.encryptionKey),
+    k: "0".repeat(32),
+    p: "ntfy",
+    s: "https://ntfy.sh/",
+    relyingPublicKey: peer.encryptionKey.toString() as SerializedEncryptionKey,
+    encryptionKey: local.encryptionKey.toString() as SerializedEncryptionKey,
+    decryptionKey: local.decryptionKey.toString() as SerializedEncryptionKey,
+    pairingId: "pairing-id",
+    transportId: "wrtc",
+    lastCounter: 1,
+    lastSeenCounter: 1,
+    lastSeenAckCounter: 1,
+  };
+
+  return { parameters, peer };
+};
+
+const unusedTransport: TransportLayerFunction = {
+  transportId: "wrtc",
+  create: () => { throw new Error("Transport creation is not reached"); },
+};
+
+it("classifies inconsistent saved key material as deterministic invalid state", async () => {
+  const { parameters } = await createSavedState();
+
+  parameters.h = "0".repeat(16);
+
+  await expect(
+    createSession(parameters, [unusedTransport], async () => ({}), {
+      onConnectionParametersChange: () => {},
+    }),
+  ).rejects.toBeInstanceOf(InvalidSavedSessionError);
+});
+
+it("rejects resumption without a synchronous persistence callback", async () => {
+  const { parameters } = await createSavedState();
+
+  await expect(createSession(parameters, [unusedTransport], async () => ({})))
+    .rejects.toThrow("Resuming a saved session requires durable connection parameter persistence");
+});
+
+it("keeps saved state when its persisted transport is unavailable", async () => {
+  const { parameters, peer } = await createSavedState();
   const [signalStatus, setSignalStatus] = observable<SignalingStatus>(SignalingStatus.STANDBY);
   const [peerKey, setPeerKey] = observable<typeof peer.encryptionKey | undefined>(undefined);
   const [peerCapabilities] = observable<PeerCapabilities | undefined>({ transports: ["wrtc"] });
@@ -44,35 +83,32 @@ it("keeps saved state when its persisted transport is unavailable", async () => 
     send: vi.fn(async () => {}),
   }) as unknown as SignalingLayer;
 
-  loadSignaling.mockImplementation(createSignalingLoader(signal));
+  const createSignal = async () => signal;
 
-  const unusedTransport: TransportLayerFunction = {
-    transportId: "wrtc",
-    create: () => { throw new Error("The persisted transport is unavailable"); },
-  };
-  const savedParameters = {
-    version: 1 as const,
-    sessionId: "mytestsession111",
-    h: await hashPublicKey(local.encryptionKey),
-    k: "0".repeat(32),
-    p: "ntfy",
-    s: "https://ntfy.sh/",
-    relyingPublicKey: peer.encryptionKey.toString() as SerializedEncryptionKey,
-    encryptionKey: local.encryptionKey.toString() as SerializedEncryptionKey,
-    decryptionKey: local.decryptionKey.toString() as SerializedEncryptionKey,
-    pairingId: "pairing-id",
-    transportId: "unsupported",
-    lastCounter: 1,
-    lastSeenCounter: 1,
-    lastSeenAckCounter: 1,
-  };
+  loadSignaling.mockResolvedValue(async () => createSignal);
+  parameters.transportId = "unsupported";
+
   const session = await createSession(
-    savedParameters,
+    parameters,
     [unusedTransport],
     async () => ({}),
     { onConnectionParametersChange: () => {} },
   );
+  const closed = new Promise<{ reason: string | undefined; isPairingInvalidated: boolean; }>((resolve) => {
+    session.emitter.once("close", (reason, isPairingInvalidated) => {
+      resolve({ reason, isPairingInvalidated });
+    });
+  });
 
-  await expect(session.connect()).rejects.toThrow("No common transport with peer");
-  expect(session._internal.isPairingInvalidated).toBe(false);
+  try {
+    await session.connect();
+  }
+  catch {
+    // Terminal closure below describes the failure regardless of setup timing.
+  }
+
+  await expect(closed).resolves.toEqual({
+    reason: "No common transport with peer",
+    isPairingInvalidated: false,
+  });
 });

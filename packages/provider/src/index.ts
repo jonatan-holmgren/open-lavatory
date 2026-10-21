@@ -11,7 +11,7 @@ import {
   type Session,
   SessionStatus,
 } from "@openlv/session";
-import { type PeerInfo, Status as SignalStatus } from "@openlv/signaling";
+import type { PeerInfo } from "@openlv/signaling";
 import type { TransportProtocol } from "@openlv/transport";
 import { webrtc, type WebRTCConfig } from "@openlv/transport/webrtc";
 import { Provider as OxProvider } from "ox";
@@ -122,7 +122,7 @@ export const createProvider = (
   const [error, setError] = observable<string | undefined>(undefined);
 
   let currentOperation = 0;
-  let unsubscribeSessionStatus: (() => void) | undefined;
+  let unsubscribeSession: (() => void) | undefined;
   let restoringSession: Promise<Session> | undefined;
   const storage = createProviderStorage({
     storage: parameters.storage,
@@ -143,8 +143,8 @@ export const createProvider = (
   const didResetSession = (operation: number, reason?: string): boolean => {
     if (operation !== currentOperation) return false;
 
-    unsubscribeSessionStatus?.();
-    unsubscribeSessionStatus = undefined;
+    unsubscribeSession?.();
+    unsubscribeSession = undefined;
     setSession(undefined);
 
     if (operation !== currentOperation) return false;
@@ -255,20 +255,13 @@ export const createProvider = (
 
       setSession(next);
       assertCurrentOperation(operation);
-      unsubscribeSessionStatus?.();
-      const onSessionStatusChange = () => {
+      unsubscribeSession?.();
+      const onSessionClosed = (reason: string | undefined, isPairingInvalidated: boolean) => {
         if (operation !== currentOperation || session.get() !== next) return;
-
-        if (next.status.get() !== SessionStatus.DISCONNECTED) return;
-
-        // Keep the pairing while signaling can recover a dropped transport.
-        if (next.signalStatus.get() !== SignalStatus.ERROR && next._internal.transport) return;
-
-        const reason = next.error.get();
 
         if (!didResetSession(operation, reason)) return;
 
-        if (!reason || next._internal.isPairingInvalidated) clearSavedSession();
+        if (reason === undefined || isPairingInvalidated) clearSavedSession();
 
         if (operation !== currentOperation) return;
 
@@ -279,12 +272,10 @@ export const createProvider = (
 
         oxEmitter.emit("disconnect", disconnectError);
       };
-      const unsubscribeStatus = next.status.subscribe(onSessionStatusChange);
-      const unsubscribeSignalStatus = next.signalStatus.subscribe(onSessionStatusChange);
 
-      unsubscribeSessionStatus = () => {
-        unsubscribeStatus();
-        unsubscribeSignalStatus();
+      next.emitter.on("close", onSessionClosed);
+      unsubscribeSession = () => {
+        next.emitter.off("close", onSessionClosed);
       };
       setStatus(ProviderStatus.CONNECTING);
       assertCurrentOperation(operation);
@@ -337,10 +328,7 @@ export const createProvider = (
       if (didResetSession(operation, reason)) {
         currentOperation++;
 
-        if (
-          startedSession?._internal.isPairingInvalidated
-          || (isRestoreAttempt && error_ instanceof InvalidSavedSessionError)
-        ) {
+        if (isRestoreAttempt && error_ instanceof InvalidSavedSessionError) {
           clearSavedSession();
         }
       }

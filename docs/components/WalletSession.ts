@@ -10,7 +10,6 @@ import {
   type Session,
   SessionStatus,
 } from "@openlv/session";
-import { Status as SignalStatus } from "@openlv/signaling";
 import { webrtc } from "@openlv/transport/webrtc";
 import { useEffect, useMemo, useState } from "react";
 import type { EIP1193Provider } from "viem";
@@ -57,6 +56,14 @@ const clearWalletSession = () => {
   globalThis.sessionStorage.removeItem(WALLET_SESSION_STORAGE_KEY);
 };
 
+const findWalletConnector = (connections: Config["state"]["connections"]) => {
+  for (const { connector, accounts } of connections.values()) {
+    if (connector.type !== "openLv" && accounts.length > 0) return connector;
+  }
+
+  return undefined;
+};
+
 const walletInfo = (connector: Connector): PeerInfo => {
   // EIP-6963 icons are data URIs of arbitrary size; anything over the 8 KB
   // wire limit would make the session handshake throw.
@@ -69,15 +76,6 @@ const walletInfo = (connector: Connector): PeerInfo => {
     name: connector.name,
     ...(icon && { icon }),
   };
-};
-
-const readyConnector = async (connector: Connector, signal: AbortSignal) => {
-  signal.throwIfAborted();
-  const provider = await connector.getProvider() as EIP1193Provider | undefined;
-
-  if (!provider) throw new Error("Wallet provider is not ready");
-
-  return { connector, provider };
 };
 
 /** Join or restore a pairing, publishing its handles before connecting so it can be cancelled. */
@@ -123,37 +121,25 @@ const connectWalletSession = async (
     void session.close({ notifyPeer: false });
   };
   const detachLog = attachTryItSession(session, "wallet", actions, { logRequests: false });
-  let hasEnded = false;
-  const observe = () => {
-    if (hasEnded || signal.aborted) return;
+  const stopStatusWatch = session.status.subscribe((status) => {
+    if (status === SessionStatus.CONNECTED) settle(status);
+  });
+  const onSessionClosed = (reason: string | undefined, isPairingInvalidated: boolean) => {
+    if (signal.aborted) return;
 
-    const status = session.status.get();
-    const hasSignalingError = session.signalStatus.get() === SignalStatus.ERROR;
-
-    if (!hasSignalingError && status === SessionStatus.CONNECTED) {
-      settle(status);
-
-      return;
-    }
-
-    if (!hasSignalingError && (status !== SessionStatus.DISCONNECTED || session._internal.transport)) return;
-
-    hasEnded = true;
-    const reason = session.error.get() ?? (hasSignalingError ? "Signaling failed" : undefined);
-
-    if (reason === undefined || session._internal.isPairingInvalidated) clearWalletSession();
+    if (reason === undefined || isPairingInvalidated) clearWalletSession();
 
     if (reason !== undefined) actions.setPhase("error");
 
     settle(SessionStatus.DISCONNECTED);
     onClosed(reason);
   };
-  const stopStatusWatch = session.status.subscribe(observe);
-  const stopSignalWatch = session.signalStatus.subscribe(observe);
+
+  session.emitter.on("close", onSessionClosed);
   const detach = () => {
     detachLog();
     stopStatusWatch();
-    stopSignalWatch();
+    session.emitter.off("close", onSessionClosed);
     signal.removeEventListener("abort", abort);
   };
 
@@ -227,21 +213,15 @@ export const useWalletSession = (config: Config, actions: TryItSessionActions): 
       setConnecting(true);
 
       try {
-        let connector = preferredConnector;
-
-        if (!connector) {
-          for (const candidate of config.state.connections.values()) {
-            if (candidate.connector.type !== "openLv" && candidate.accounts.length > 0) {
-              connector = candidate.connector;
-
-              break;
-            }
-          }
-        }
+        const connector = preferredConnector ?? findWalletConnector(config.state.connections);
 
         if (!connector) throw new Error("No authorized wallet connector is connected");
 
-        const ready = await readyConnector(connector, controller.signal);
+        controller.signal.throwIfAborted();
+        const client = await connector.getProvider() as EIP1193Provider | undefined;
+
+        if (!client) throw new Error("Wallet provider is not ready");
+
         const material = parameters ?? loadWalletSession();
 
         if (!material) {
@@ -256,7 +236,7 @@ export const useWalletSession = (config: Config, actions: TryItSessionActions): 
           typeof material === "string" ? material : encodeConnectionURL(material),
         ));
         await connectWalletSession(
-          material, ready.connector, ready.provider, actions, controller.signal,
+          material, connector, client, actions, controller.signal,
           (session, stop) => {
             current = session;
             detach = stop;
@@ -312,15 +292,7 @@ export const useWalletSession = (config: Config, actions: TryItSessionActions): 
     const stopWatching = config.subscribe(
       state => state.connections,
       (connections) => {
-        let connector: Connector | undefined;
-
-        for (const candidate of connections.values()) {
-          if (candidate.connector.type !== "openLv" && candidate.accounts.length > 0) {
-            connector = candidate.connector;
-
-            break;
-          }
-        }
+        const connector = findWalletConnector(connections);
 
         if (!connector) {
           lastConnectorUid = undefined;

@@ -53,9 +53,6 @@ export type TransportMessage = {
 export type TransportLayer = {
   type: TransportProtocol;
   setup: () => Promise<void>;
-  // Recreate the underlying connection after a resumed session, so the host
-  // can re-offer and the client can answer again.
-  renegotiate: () => Promise<void>;
   teardown: () => Promise<void>;
   send: (message: object) => Promise<void>;
   handle: (message: TransportMessage) => Promise<void>;
@@ -145,17 +142,9 @@ export const createTransportBase = (
       await channel.teardown();
     };
 
-    const renegotiate = async () => {
-      setStatus(Status.CONNECTING);
-      await channel.teardown();
-      await channel.setup();
-      setStatus(Status.READY);
-    };
-
     return {
       type: transportId,
       setup,
-      renegotiate,
       teardown,
       handle,
       send,

@@ -104,19 +104,14 @@ export const createResumeController = (
   };
   let isStopped = false;
   let failureReason: string | undefined;
-  let didResume = false;
   let pendingInitiator:
     | {
       challenge: string;
-      counter: number;
+      notified: boolean;
       cancelTimeout: () => void;
     }
     | undefined;
   const pendingResponders = new Map<number, PendingResponder>();
-  // Deduplicate both directions of one in-flight exchange, not later resumes.
-  const beginNewExchange = () => {
-    if (!pendingInitiator && pendingResponders.size === 0) didResume = false;
-  };
 
   const clearInitiator = () => {
     pendingInitiator?.cancelTimeout();
@@ -181,26 +176,10 @@ export const createResumeController = (
     }
   };
 
-  const complete = (key: EncryptionKey, role: "initiator" | "responder") => {
-    if (isStopped) return;
-
-    if (role === "initiator") clearInitiator();
-    else clearResponders();
-
-    acceptPeerKey(key);
-
-    if (!isStopped && !didResume) {
-      didResume = true;
-      onResumed();
-    }
-  };
-
   const resume = async () => {
     if (isStopped) throw new Error(failureReason ?? "Resume controller has been torn down");
 
     if (pendingInitiator) return;
-
-    beginNewExchange();
 
     const counter = nextCounter();
 
@@ -213,7 +192,7 @@ export const createResumeController = (
 
     pendingInitiator = {
       challenge,
-      counter,
+      notified: false,
       cancelTimeout: () => clearTimeout(timer),
     };
 
@@ -249,8 +228,6 @@ export const createResumeController = (
 
     // Ignore duplicates without resetting a pending challenge or its timer.
     if (pendingResponders.has(payload.counter)) return;
-
-    beginNewExchange();
 
     // Keep a bounded set so a replay cannot replace another in-flight proof.
     if (pendingResponders.size >= MAX_PENDING_RESPONDER_ATTEMPTS) return;
@@ -313,7 +290,16 @@ export const createResumeController = (
       ...state,
       lastSeenCounter: Math.max(state.lastSeenCounter, responder.initiatorCounter),
     });
-    complete(responder.key, "responder");
+    clearResponders();
+    acceptPeerKey(responder.key);
+
+    // A simultaneous request preceded the peer's ack. Its proof still commits
+    // the inbound replay counter, but the outbound exchange owns notification.
+    if (!isStopped && responder.initiatorCounter > state.lastSeenAckCounter) {
+      if (pendingInitiator) pendingInitiator.notified = true;
+
+      onResumed();
+    }
   };
 
   const handleResumeAck = async (message: SignalMessageResumeAck) => {
@@ -338,6 +324,8 @@ export const createResumeController = (
     // pinned-key parsing awaited; only the still-newer ack may proceed.
     if (!isAdvancingCounter("resume-ack", payload.counter, state.lastSeenAckCounter)) return;
 
+    // An inbound confirm may arrive while send awaits. Commit first so it can
+    // recognize a request that preceded this ack as the same simultaneous resume.
     persist({ ...state, lastSeenAckCounter: payload.counter });
 
     await send({
@@ -351,7 +339,10 @@ export const createResumeController = (
 
     if (isStopped || pendingInitiator !== initiator) return;
 
-    complete(key, "initiator");
+    clearInitiator();
+    acceptPeerKey(key);
+
+    if (!isStopped && !initiator.notified) onResumed();
   };
 
   return {

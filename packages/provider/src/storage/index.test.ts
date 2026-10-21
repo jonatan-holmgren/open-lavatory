@@ -3,31 +3,9 @@ import { generateKeyPair, hashPublicKey } from "@openlv/core/encryption";
 import { describe, expect, it } from "vitest";
 
 import { createProviderStorage } from "./index.js";
+import { createStorage } from "./test-storage.js";
 
 const SESSION_STORAGE_KEY = "@openlv/connector/session";
-
-const createStorage = () => {
-  const values = new Map<string, string>();
-
-  return {
-    getItem: (key: string) => values.get(key) ?? null,
-    setItem: (key: string, value: string) => { values.set(key, value); },
-    removeItem: (key: string) => { values.delete(key); },
-    clear: () => values.clear(),
-    key: (index: number) => {
-      let current = 0;
-
-      for (const key of values.keys()) {
-        if (current === index) return key;
-
-        current++;
-      }
-
-      return null;
-    },
-    get length() { return values.size; },
-  } as Storage;
-};
 
 const createParameters = async (): Promise<SessionConnectionParameters> => {
   const local = await generateKeyPair();
@@ -69,23 +47,16 @@ describe("saved session storage", () => {
     expect(storage.getSession()).toEqual(parameters);
   });
 
-  it("migrates legacy records that stored parameters directly", async () => {
-    const backing = createStorage();
-    const storage = createProviderStorage({ storage: backing });
-    const parameters = await createParameters();
+  it.each(["{", JSON.stringify({ storageVersion: 2, parameters: {} })])(
+    "removes corrupt or unsupported record %s instead of returning it",
+    (record) => {
+      const backing = createStorage();
+      const storage = createProviderStorage({ storage: backing });
 
-    backing.setItem(SESSION_STORAGE_KEY, JSON.stringify(parameters));
+      backing.setItem(SESSION_STORAGE_KEY, record);
 
-    expect(storage.getSession()).toEqual(parameters);
-  });
-
-  it("removes corrupt or unsupported records instead of returning them", async () => {
-    const backing = createStorage();
-    const storage = createProviderStorage({ storage: backing });
-
-    backing.setItem(SESSION_STORAGE_KEY, "{");
-
-    expect(storage.getSession()).toBeUndefined();
-    expect(backing.getItem(SESSION_STORAGE_KEY)).toBeNull();
-  });
+      expect(storage.getSession()).toBeUndefined();
+      expect(backing.getItem(SESSION_STORAGE_KEY)).toBeNull();
+    },
+  );
 });

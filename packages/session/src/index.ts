@@ -89,8 +89,6 @@ export type Session = {
   emitter: EventEmitter<SessionEvents>;
   _internal: {
     signal: SignalingLayer;
-    /** True when signaling or resume deadlines make the saved pairing unusable. */
-    isPairingInvalidated: boolean;
     /** Instantiated when signaling reaches ENCRYPTED and a transport is selected. */
     transport: TransportLayer | undefined;
   };
@@ -181,10 +179,6 @@ export const createSession = async (
     lastSeenAckCounter: savedConnection?.lastSeenAckCounter ?? 0,
   };
   const isResuming = savedConnection !== undefined;
-  // Either side may be the one that reloaded, so both must be able to initiate.
-  // Simultaneous resumes are de-duplicated by the pairing counter and challenge
-  // state machine, and completing either direction marks the session resumed.
-  const shouldInitiateResume = isResuming;
   let selectedTransportId = savedConnection?.transportId;
   const persistResumeState = (state: SignalingResumeState) => {
     options?.onConnectionParametersChange?.(buildConnectionParameters(state));
@@ -232,7 +226,7 @@ export const createSession = async (
     expectedPeerKey: relyingEncryptionKey,
     resume: {
       ...resumeState,
-      initiate: shouldInitiateResume,
+      initiate: isResuming,
       persist: persistResumeState,
     },
     k: handshakeKey,
@@ -278,6 +272,8 @@ export const createSession = async (
   let unsubscribeSignalStatus: (() => void) | undefined;
   let isStopped = false;
   let teardownPromise: Promise<void> | undefined;
+  // Serialize setup and restart; terminal teardown waits for this work to settle.
+  let transportOperation = Promise.resolve();
   let rejectPendingConnect: ((error: Error) => void) | undefined;
   const teardown = () => {
     if (teardownPromise) return teardownPromise;
@@ -301,7 +297,10 @@ export const createSession = async (
     teardownPromise = (async () => {
       try {
         await Promise.all([
-          closingTransport?.teardown(),
+          (async () => {
+            await transportOperation;
+            await closingTransport?.teardown();
+          })(),
           signal.teardown(),
         ]);
       }
@@ -311,6 +310,7 @@ export const createSession = async (
       }
     })();
     setStatus(SessionStatus.DISCONNECTED);
+    emitter.emit("close", lastError.get(), isPairingInvalidated);
 
     return teardownPromise;
   };
@@ -374,73 +374,83 @@ export const createSession = async (
     clearLinkDeadline();
     setLastErrorIfUnset(error instanceof Error ? error.message : "Transport setup failed");
     setStatus(SessionStatus.DISCONNECTED);
+
+    if (!transport) void teardown();
   };
 
-  const startTransport = async () => {
-    if (isStopped || transport || !signal.peerKey.get()) return;
+  const startTransport = (shouldRestart = false) => {
+    const previous = transportOperation;
 
-    const peerCapabilities = signal.peerCapabilities.get();
-    let transportId = selectedTransportId;
+    transportOperation = (async () => {
+      await previous;
 
-    if (!transportId && peerCapabilities) {
-      const hostPreference = isHost ? capabilities.transports : peerCapabilities.transports;
-      const clientSupported = isHost ? peerCapabilities.transports : capabilities.transports;
+      if (isStopped || !signal.peerKey.get() || (transport && !shouldRestart)) return;
 
-      transportId = hostPreference.find(candidate => clientSupported.includes(candidate));
-    }
+      try {
+        let current = transport;
 
-    const layer = transportLayers.find(layer => layer.transportId === transportId);
+        if (current) {
+          await current.teardown();
 
-    if (!layer) {
-      log("no common transport with peer", capabilities.transports, peerCapabilities?.transports);
-      setLastErrorIfUnset("No common transport with peer");
-      await teardown();
+          if (isStopped) return;
+        }
+        else {
+          const peerCapabilities = signal.peerCapabilities.get();
+          let transportId = selectedTransportId;
 
-      return;
-    }
+          if (!transportId && peerCapabilities) {
+            const hostPreference = isHost ? capabilities.transports : peerCapabilities.transports;
+            const clientSupported = isHost ? peerCapabilities.transports : capabilities.transports;
 
-    selectedTransportId = layer.transportId;
-    transport = layer.create({
-      encrypt,
-      decrypt,
-      isHost,
-      onmessage: messaging.handleTransportMessage,
-      async subsend(message) {
-        await signal.send({
-          type: "request",
-          messageId: crypto.randomUUID(),
-          payload: message,
-        } satisfies SessionMessage);
-      },
-    });
-    transport.emitter.on("error", onTransportError);
-    unsubscribeTransportStatus = transport.status.subscribe(onTransportStateChange);
-    armLinkDeadline();
-    await transport.setup();
-    isTransportReady = true;
-    await messaging.flushNegotiation();
-  };
+            transportId = hostPreference.find(candidate => clientSupported.includes(candidate));
+          }
 
-  const onSignalResume = async () => {
-    if (isStopped) return;
+          const layer = transportLayers.find(layer => layer.transportId === transportId);
 
-    try {
-      setStatus(SessionStatus.LINKING);
+          if (!layer) throw new Error("No common transport with peer");
 
-      if (transport) {
+          selectedTransportId = layer.transportId;
+          current = layer.create({
+            encrypt,
+            decrypt,
+            isHost,
+            onmessage: messaging.handleTransportMessage,
+            async subsend(message) {
+              await signal.send({
+                type: "request",
+                messageId: crypto.randomUUID(),
+                payload: message,
+              } satisfies SessionMessage);
+            },
+          });
+          transport = current;
+          current.emitter.on("error", onTransportError);
+          unsubscribeTransportStatus = current.status.subscribe(onTransportStateChange);
+        }
+
         armLinkDeadline();
-        isTransportReady = false;
-        await transport.renegotiate();
+        await current.setup();
+
+        if (isStopped) return;
+
         isTransportReady = true;
         await messaging.flushNegotiation();
       }
-      else {
-        await startTransport();
+      catch (error) {
+        onTransportSetupError(error);
       }
-    }
-    catch (error) {
-      onTransportSetupError(error);
-    }
+    })();
+
+    return transportOperation;
+  };
+
+  const onSignalResume = () => {
+    if (isStopped) return;
+
+    setStatus(SessionStatus.LINKING);
+    isTransportReady = false;
+    armLinkDeadline();
+    void startTransport(true);
   };
 
   const onSignalError = (reason: string, shouldInvalidatePairing = false) => {
@@ -460,7 +470,7 @@ export const createSession = async (
     }
 
     if (signalStatus === SignalStatus.ENCRYPTED) {
-      void startTransport().catch(onTransportSetupError);
+      void startTransport();
     }
 
     if (signalStatus === SignalStatus.ERROR) {
@@ -498,7 +508,7 @@ export const createSession = async (
               return;
             }
 
-            if (shouldInitiateResume) {
+            if (isResuming) {
               await signal.resume();
             }
           })(),
@@ -555,9 +565,6 @@ export const createSession = async (
     },
     _internal: {
       signal,
-      get isPairingInvalidated() {
-        return isPairingInvalidated;
-      },
       get transport() {
         return transport;
       },

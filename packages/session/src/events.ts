@@ -5,4 +5,6 @@ export type SessionEvents = {
    * needing to intercept the `onMessage` callback.
    */
   request: (payload: object | string) => void;
+  /** Terminal closure; transport interruptions that can resume do not emit it. */
+  close: (reason: string | undefined, isPairingInvalidated: boolean) => void;
 };

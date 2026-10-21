@@ -24,6 +24,7 @@ vi.mock("@openlv/session", () => ({
 
 import { createProvider, ProviderStatus } from "./index.js";
 import { createProviderStorage } from "./storage/index.js";
+import { createStorage } from "./storage/test-storage.js";
 
 const createSavedParameters = async (): Promise<SessionConnectionParameters> => {
   const local = await generateKeyPair();
@@ -45,29 +46,6 @@ const createSavedParameters = async (): Promise<SessionConnectionParameters> => 
     lastSeenCounter: 1,
     lastSeenAckCounter: 1,
   };
-};
-
-const createStorage = () => {
-  const values = new Map<string, string>();
-
-  return {
-    getItem: (key: string) => values.get(key) ?? null,
-    setItem: (key: string, value: string) => { values.set(key, value); },
-    removeItem: (key: string) => { values.delete(key); },
-    clear: () => values.clear(),
-    key: (index: number) => {
-      let current = 0;
-
-      for (const key of values.keys()) {
-        if (current === index) return key;
-
-        current++;
-      }
-
-      return null;
-    },
-    get length() { return values.size; },
-  } as Storage;
 };
 
 const createReadySession = (savedParameters: SessionConnectionParameters) => {
@@ -96,7 +74,6 @@ const createReadySession = (savedParameters: SessionConnectionParameters) => {
       return { result: "0x1" };
     },
     emitter: new EventEmitter(),
-    _internal: { isPairingInvalidated: false, transport: {} },
   };
 };
 
@@ -118,17 +95,11 @@ describe("provider automatic session restoration", () => {
 
     await provider.status.until(status => status === ProviderStatus.CONNECTED);
 
-    expect(createSessionMock).toHaveBeenCalledWith(
-      savedParameters,
-      expect.any(Array),
-      expect.any(Function),
-      expect.objectContaining({ onConnectionParametersChange: expect.any(Function) }),
-    );
     expect(provider.session.get()).toBe(restored);
     expect(await provider.getAccounts()).toEqual([]);
   });
 
-  it("clears a saved pairing when transport failure invalidates it", async () => {
+  it("clears a saved pairing when terminal closure invalidates it", async () => {
     const backingStorage = createStorage();
     const seededStorage = createProviderStorage({ storage: backingStorage });
 
@@ -139,15 +110,15 @@ describe("provider automatic session restoration", () => {
 
     const failed = createReadySession(savedParameters);
 
-    failed._internal.isPairingInvalidated = true;
     failed.connect = async () => {
-      throw new Error("No common transport with peer");
+      failed.emitter.emit("close", "Resume counter cannot safely advance", true);
+      throw new Error("Resume counter cannot safely advance");
     };
     createSessionMock.mockResolvedValue(failed);
 
     const provider = createProvider({ storage: backingStorage });
 
-    await expect(provider.restoreSession()).rejects.toThrow("No common transport with peer");
+    await expect(provider.restoreSession()).rejects.toThrow("Resume counter cannot safely advance");
     expect(provider.storage.getSession()).toBeUndefined();
   });
 

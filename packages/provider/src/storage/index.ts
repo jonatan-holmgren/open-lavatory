@@ -66,16 +66,9 @@ export type ProviderStorageR = {
   clearSession: () => void;
 };
 
-const parseStoredSession = (parsed: unknown): SessionConnectionParameters | undefined => {
-  if (isObject(parsed) && "storageVersion" in parsed) {
-    return parsed["storageVersion"] === SESSION_STORAGE_VERSION
-      ? parseSessionConnectionParameters(parsed["parameters"])
-      : undefined;
-  }
-
-  // Legacy records stored the parameters directly.
-  return parseSessionConnectionParameters(parsed);
-};
+const parseStoredSession = (parsed: unknown): SessionConnectionParameters | undefined => (isObject(parsed) && parsed["storageVersion"] === SESSION_STORAGE_VERSION
+  ? parseSessionConnectionParameters(parsed["parameters"])
+  : undefined);
 
 export const createProviderStorage = ({
   storage,
