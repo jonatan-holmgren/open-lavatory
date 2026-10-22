@@ -220,21 +220,34 @@ export const attachTryItSession = (
     logRpc(actions, role, "in", payload, request.method);
   };
 
+  // A transport interruption stays DISCONNECTED without the terminal close
+  // event while resume recovers; terminal closure settles the phase once.
+  let isSessionClosed = false;
+  const onSessionClosed = (reason: string | undefined, isPairingInvalidated: boolean) => {
+    isSessionClosed = true;
+    const hasError = reason !== undefined;
+
+    actions.setPhase(sessionToPhase(SessionStatus.DISCONNECTED, hasError));
+
+    if (!hasError || isPairingInvalidated) actions.setPeer(null);
+  };
+
+  session.emitter.on("close", onSessionClosed);
+
   // Every observable replays its current value on subscribe, so this reports
   // the session as it stands before it reports any change to it.
   const unsubscribes = [
     session.status.subscribe((status) => {
       const hasError = session.error.get() !== undefined;
-      const isCleanClose
-        = status === SessionStatus.DISCONNECTED && !hasError && !session._internal.transport;
+      const isReconnecting = status === SessionStatus.DISCONNECTED && !isSessionClosed;
 
-      actions.setPhase(
-        status === SessionStatus.DISCONNECTED && session._internal.transport
-          ? "establishing"
-          : sessionToPhase(status, hasError),
-      );
+      if (isReconnecting || status !== SessionStatus.DISCONNECTED) {
+        actions.setPhase(isReconnecting ? "establishing" : sessionToPhase(status, hasError));
+      }
 
-      if (isCleanClose) actions.setPeer(null);
+      if (!isReconnecting && !hasError && status === SessionStatus.DISCONNECTED) {
+        actions.setPeer(null);
+      }
 
       logSession();
     }),
@@ -262,6 +275,8 @@ export const attachTryItSession = (
 
   return () => {
     for (const unsubscribe of unsubscribes) unsubscribe();
+
+    session.emitter.off("close", onSessionClosed);
 
     if (options?.logRequests !== false) {
       session.emitter.off("request", onRequest);
