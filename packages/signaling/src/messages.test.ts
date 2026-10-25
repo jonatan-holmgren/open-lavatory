@@ -72,6 +72,8 @@ describe("parseSignalMessage", () => {
   });
 
   it("rejects capabilities with malformed info", () => {
+    const oversizedIcon = "x".repeat(10_000);
+
     expect(
       parseSignalMessage(
         frame("capabilities", { transports: ["wrtc"], info: { name: "No identity" } }),
@@ -84,7 +86,7 @@ describe("parseSignalMessage", () => {
           info: {
             identity: "com.example.wallet",
             name: "Example Wallet",
-            icon: "x".repeat(10_000),
+            icon: oversizedIcon,
           },
         }),
       ),
@@ -95,6 +97,53 @@ describe("parseSignalMessage", () => {
     expect(parseSignalMessage(frame("ack", undefined))).toBeUndefined();
     expect(parseSignalMessage(frame("nonsense", {}))).toBeUndefined();
     expect(parseSignalMessage("not json")).toBeUndefined();
+  });
+
+  it("parses a resume-confirm challenge echo", () => {
+    expect(parseSignalMessage(frame("resume-confirm", {
+      pairingId: "pairing",
+      challenge: "fresh-responder-challenge",
+    }))).toMatchObject({
+      type: "resume-confirm",
+      payload: { pairingId: "pairing", challenge: "fresh-responder-challenge" },
+    });
+    const invalidConfirm = frame("resume-confirm", {
+      pairingId: "pairing",
+      proof: "a".repeat(64),
+    });
+
+    expect(parseSignalMessage(invalidConfirm)).toBeUndefined();
+  });
+
+  it("rejects signaling messages without a numeric timestamp", () => {
+    const messages = [
+      ["flash", {}],
+      ["pubkey", { publicKey: "abc" }],
+      ["capabilities", { transports: ["wrtc"] }],
+      ["data", {}],
+      ["resume", {
+        version: 1,
+        pairingId: "pairing",
+        publicKey: "public-key",
+        challenge: "challenge",
+        counter: 1,
+      }],
+      ["resume-ack", {
+        version: 1,
+        pairingId: "pairing",
+        publicKey: "public-key",
+        challenge: "challenge",
+        initiatorChallenge: "initiator-challenge",
+        counter: 1,
+      }],
+      ["resume-confirm", { pairingId: "pairing", challenge: "challenge" }],
+    ] as const;
+
+    for (const [type, payload] of messages) {
+      expect(parseSignalMessage(JSON.stringify({ type, payload }))).toBeUndefined();
+      expect(parseSignalMessage(JSON.stringify({ type, payload, timestamp: "now" })))
+        .toBeUndefined();
+    }
   });
 
   it("still parses flash, pubkey, and data", () => {
