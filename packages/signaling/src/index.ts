@@ -1,14 +1,11 @@
-import { make, type Observable, observable } from "@openlv/core";
+import { make, type Observable, observable, type PeerCapabilities } from "@openlv/core";
 import type { EncryptionKey, SymmetricKey } from "@openlv/core/encryption";
 import { parseEncryptionKey, validatePublicKeyHash } from "@openlv/core/encryption";
 import { EventEmitter } from "eventemitter3";
 import { match } from "ts-pattern";
 
 import { handshake, XR_H_PREFIX, XR_PREFIX } from "./handshake.js";
-import {
-  type PeerCapabilities,
-  type SignalMessage,
-} from "./messages.js";
+import type { SignalMessage } from "./messages.js";
 import type { SignalingChannel } from "./protocol.js";
 import { log } from "./utils/log.js";
 

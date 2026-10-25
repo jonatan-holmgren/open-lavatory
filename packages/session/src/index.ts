@@ -3,8 +3,11 @@ import {
   type Observable,
   observable,
   OPENLV_PROTOCOL_VERSION,
+  type PeerCapabilities,
+  type PeerInfo,
   type SessionHandshakeParameters,
   type SessionLinkParameters,
+  validatePeerInfo,
 } from "@openlv/core";
 import {
   deriveSymmetricKey,
@@ -14,11 +17,8 @@ import {
   initHash,
 } from "@openlv/core/encryption";
 import {
-  type PeerCapabilities,
-  type PeerInfo,
   type SignalingLayer,
   Status as SignalStatus,
-  validatePeerInfo,
 } from "@openlv/signaling";
 import {
   Status as TransportStatus,
@@ -40,9 +40,8 @@ import { log } from "./utils/log.js";
 
 export { loadSignaling, loadTransport } from "./dynamic.js";
 
-// `peerInfo` is part of the session's surface, so consumers must be able to
-// name its type without reaching into @openlv/signaling.
-export type { PeerInfo } from "@openlv/signaling";
+// `peerInfo` is part of the session's surface, so consumers can name its type here.
+export type { PeerInfo } from "@openlv/core";
 
 export const SessionStatus = {
   CREATED: "created",

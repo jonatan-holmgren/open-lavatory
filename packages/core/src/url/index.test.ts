@@ -1,3 +1,5 @@
+import { inspect } from "node:util";
+
 import { describe, expect, test } from "vitest";
 
 import { decodeConnectionURL, encodeConnectionURL } from "./index.js";
@@ -31,5 +33,20 @@ describe("URL Utilities", () => {
 
       expect(result).toEqual(testCase.url);
     }
+  });
+
+  test("keeps bootstrap secrets out of inspected URL parsing errors", () => {
+    const secret = "0123456789abcdef0123456789abcdef";
+    let failure: unknown;
+
+    try {
+      decodeConnectionURL(`openlv://[?k=${secret}`);
+    }
+    catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(inspect(failure, { depth: null })).not.toContain(secret);
   });
 });

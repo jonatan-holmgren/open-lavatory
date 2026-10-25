@@ -1,3 +1,4 @@
+import type { PeerCapabilities } from "@openlv/core";
 import {
   deriveSymmetricKey,
   type EncryptionKey,
@@ -6,8 +7,7 @@ import {
 } from "@openlv/core/encryption";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createSignalingLayer, Status, type SignalingLayer } from "./index.js";
-import type { PeerCapabilities } from "./messages.js";
+import { createSignalingLayer, type SignalingLayer, Status } from "./index.js";
 import type { SignalingChannel } from "./protocol.js";
 
 /**
