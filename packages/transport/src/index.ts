@@ -26,6 +26,7 @@ export type TLayerEventMap = {
   error: (reason?: string) => void;
 };
 
+
 export type TransportLayerParameters = {
   isHost: boolean;
   encrypt: EncryptionKey["encrypt"];
