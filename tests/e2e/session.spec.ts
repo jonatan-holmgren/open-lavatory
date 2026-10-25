@@ -38,7 +38,7 @@ const captureConsole = (page: Page): Capture => {
 
     lines.push(text);
 
-    for (const [index, waiter] of [...waiters.entries()].reverse()) {
+    for (const [index, waiter] of Array.from(waiters.entries()).toReversed()) {
       if (!waiter.pattern.test(text)) {
         continue;
       }
@@ -77,24 +77,27 @@ const captureConsole = (page: Page): Capture => {
 
 const openSandbox = async (page: Page) => {
   await page.addInitScript(() => {
-    (globalThis as { OPENLV_DEBUG?: boolean; }).OPENLV_DEBUG = true;
+    Object.defineProperty(globalThis, "OPENLV_DEBUG", {
+      configurable: true,
+      value: true,
+    });
   });
   await page.goto(SANDBOX_URL);
 };
 
 /** Whether this environment can produce any local ICE candidates at all. */
 const probeIce = (page: Page) => page.evaluate(async () => {
-  const pc = new RTCPeerConnection();
+  const pc = new globalThis.RTCPeerConnection();
 
   pc.createDataChannel("probe");
 
   let count = 0;
 
-  pc.onicecandidate = (e) => {
-    if (e.candidate) count += 1;
+  pc.onicecandidate = (event) => {
+    if (event.candidate) count += 1;
   };
   await pc.setLocalDescription(await pc.createOffer());
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => globalThis.setTimeout(resolve, 3000));
   pc.close();
 
   return count;
@@ -137,8 +140,8 @@ test("dApp and wallet link over at least one public relay", async ({ browser }) 
 
       // Signaling handshake must complete on both peers.
       await Promise.all([
-        dappLog.waitFor(/signal state change encrypted/, 15_000),
-        walletLog.waitFor(/signal state change encrypted/, 15_000),
+        dappLog.waitFor(/session state .*signal: encrypted/, 15_000),
+        walletLog.waitFor(/session state .*signal: encrypted/, 15_000),
       ]);
 
       // Transport negotiation must flow through encrypted signaling.
@@ -153,8 +156,8 @@ test("dApp and wallet link over at least one public relay", async ({ browser }) 
 
       if (candidates > 0) {
         await Promise.all([
-          dappLog.waitFor(/updateStatus connected/, 30_000),
-          walletLog.waitFor(/updateStatus connected/, 30_000),
+          dappLog.waitFor(/session state .*status: connected/, 30_000),
+          walletLog.waitFor(/session state .*status: connected/, 30_000),
         ]);
       }
 

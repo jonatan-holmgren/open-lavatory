@@ -52,6 +52,9 @@ importers:
       '@openlv/session':
         specifier: workspace:*
         version: link:../packages/session
+      '@openlv/signaling':
+        specifier: workspace:*
+        version: link:../packages/signaling
       '@openlv/transport':
         specifier: workspace:*
         version: link:../packages/transport

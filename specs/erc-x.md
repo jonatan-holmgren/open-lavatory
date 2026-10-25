@@ -136,7 +136,7 @@ Receivers MUST ignore frames where `recipient` does not match the local role.
 
 After decryption, a signaling payload MUST be valid JSON containing:
 
-- `type`: one of `flash`, `pubkey`, `capabilities`, or `data`
+- `type`: one of `flash`, `pubkey`, `capabilities`, `data`, `resume`, `resume-ack`, or `resume-confirm`
 - `payload`: defined below based on `type`.
 - `timestamp`: time in milliseconds since Unix epoch.
 
@@ -146,6 +146,7 @@ The signaling message types have the following meanings:
 - `pubkey`: carries a peer public key
 - `capabilities`: acknowledges the previous handshake step, negotiates the transport, and carries optional peer metadata
 - `data`: carries post-handshake signaling payloads, including transport negotiation objects
+- `resume`, `resume-ack`, `resume-confirm`: carry the authenticated resumption handshake described in Session Resumption
 
 The `capabilities` payload is:
 
@@ -166,6 +167,40 @@ The `capabilities` payload is:
 Receivers MUST treat `info` as untrusted display data: an implementation that renders or fetches `icon` is responsible for validating it first.
 
 Relays cap message size, so `icon` SHOULD NOT exceed 8192 characters, a limit that testing with common relays showed to be safe, and implementations SHOULD apply sane limits to the other fields.
+
+The resumption payloads are:
+
+```json
+{
+  "version": 1,
+  "pairingId": "<pairing id>",
+  "publicKey": "<sender static public key>",
+  "challenge": "<fresh challenge>",
+  "counter": 42
+}
+```
+
+```json
+{
+  "version": 1,
+  "pairingId": "<pairing id>",
+  "publicKey": "<sender static public key>",
+  "challenge": "<fresh challenge>",
+  "initiatorChallenge": "<echo of the initiator challenge>",
+  "counter": 7
+}
+```
+
+```json
+{
+  "pairingId": "<pairing id>",
+  "challenge": "<echo of the responder's challenge>"
+}
+```
+
+All fields shown in the resumption payloads are REQUIRED.
+`counter` MUST be a non-negative safe integer.
+`pairingId`, public keys, and challenges MUST NOT be empty and MUST have implementation-defined size limits.
 
 ### Handshake Sequence
 
@@ -265,14 +300,24 @@ Either peer MAY end the session by sending `{ "type": "close" }` before it close
 A `close` has no `messageId` and is not acknowledged.
 After a peer sends or receives `close`, it MUST NOT send further session messages and MUST fail its open requests.
 
+
 ### Session Resumption
 
-Peers MAY persist session state locally to support later resumption.
-Persisted state SHOULD include `sessionId`, `p`, `s`, `k`, session X25519 key pair, peer public key, and transport configuration.
+Peers MAY persist pairing state to reconnect without repeating the initial handshake.
+Persisted state includes `sessionId`, `p`, `s`, `k`, the local X25519 keypair, the remote public key, the selected transport, a stable `pairingId`, and replay counters.
 
-Resumption in version 1 means re-invoking communication using prior local session material.
-It does not guarantee transport continuity.
-Implementations MAY need to reconnect to the signaling infrastructure, re-establish peer public-key signaling, and renegotiate transport.
+Resumption reuses the saved capabilities but requires a new signaling connection and transport negotiation.
+Resumption uses three peer-key encrypted signaling messages:
+
+1. **`resume`:** The initiator sends its pairing ID, public key, fresh challenge, and incremented counter.
+2. **`resume-ack`:** After validating the request, the responder sends its public key, fresh challenge, incremented counter, and the initiator's challenge.
+3. **`resume-confirm`:** After validating the reply, the initiator echoes the responder's challenge.
+
+Peers MUST reject messages with an unknown `pairingId`, a public key different from the pinned key, or a counter that does not exceed the last accepted counter. Each echoed challenge MUST match the challenge from the pending exchange.
+Resumption MUST time out if the exchange does not complete.
+A failed resumption MUST NOT trigger an automatic fresh handshake. A new pairing requires a new out-of-band `openlv://` URI.
+
+Peers MUST persist outbound counters before sending the corresponding message. A responder MUST NOT commit the initiator's counter until it verifies `resume-confirm`.
 
 ### Cryptography
 
@@ -374,7 +419,9 @@ Implementations MUST use fresh randomness for IVs, nonces, ephemeral keys, and g
 Signaling infrastructure is untrusted and can observe metadata such as timing, size, and namespace.
 Implementations SHOULD validate decrypted JSON structure and expected message types before acting on payloads.
 Implementations SHOULD apply request timeouts and resource limits.
-Replay protection is not fully standardized in version 1 and SHOULD be improved in future revisions.
+
+Resumption uses monotonically increasing per-pairing counters to reject replayed requests.
+Resumption reuses static peer keys and does not provide forward secrecy.
 
 Persisted session state is sensitive and SHOULD be stored using the strongest platform protections available.
 Implementations SHOULD allow users to disconnect and delete saved session state.

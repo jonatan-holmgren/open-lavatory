@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 "use client";
 
 import type { Observable } from "@openlv/core";
@@ -76,10 +77,13 @@ const nextLogId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36)
     .slice(2, 8)}`;
 
-const sessionToPhase = (status: SessionStatus): ConnectionPhase => {
+const sessionToPhase = (
+  status: SessionStatus,
+  hasError: boolean,
+): ConnectionPhase => {
   if (status === SessionStatus.CONNECTED) return "connected";
 
-  if (status === SessionStatus.DISCONNECTED) return "error";
+  if (status === SessionStatus.DISCONNECTED) return hasError ? "error" : "idle";
 
   if (status === SessionStatus.LINKING) return "linked";
 
@@ -164,10 +168,10 @@ const logRpc = (
   direction: "in" | "out",
   payload: unknown,
   method?: string,
-  error?: boolean,
+  isError?: boolean,
 ) => {
   const arrow = direction === "in" ? "←" : "→";
-  const suffix = error ? " (error)" : "";
+  const suffix = isError ? " (error)" : "";
 
   actions.appendEntry({
     role,
@@ -176,7 +180,7 @@ const logRpc = (
     method,
     summary: method
       ? `${arrow} ${method}${suffix}`
-      : `${arrow} ${error ? "error" : (direction === "in" ? "response" : "request")}`,
+      : `${arrow} ${isError ? "error" : (direction === "in" ? "response" : "request")}`,
     payload,
   });
 };
@@ -216,11 +220,35 @@ export const attachTryItSession = (
     logRpc(actions, role, "in", payload, request.method);
   };
 
+  // A transport interruption stays DISCONNECTED without the terminal close
+  // event while resume recovers; terminal closure settles the phase once.
+  let isSessionClosed = false;
+  const onSessionClosed = (reason: string | undefined, isPairingInvalidated: boolean) => {
+    isSessionClosed = true;
+    const hasError = reason !== undefined;
+
+    actions.setPhase(sessionToPhase(SessionStatus.DISCONNECTED, hasError));
+
+    if (!hasError || isPairingInvalidated) actions.setPeer(null);
+  };
+
+  session.emitter.on("close", onSessionClosed);
+
   // Every observable replays its current value on subscribe, so this reports
   // the session as it stands before it reports any change to it.
   const unsubscribes = [
     session.status.subscribe((status) => {
-      actions.setPhase(sessionToPhase(status));
+      const hasError = session.error.get() !== undefined;
+      const isReconnecting = status === SessionStatus.DISCONNECTED && !isSessionClosed;
+
+      if (isReconnecting || status !== SessionStatus.DISCONNECTED) {
+        actions.setPhase(isReconnecting ? "establishing" : sessionToPhase(status, hasError));
+      }
+
+      if (!isReconnecting && !hasError && status === SessionStatus.DISCONNECTED) {
+        actions.setPeer(null);
+      }
+
       logSession();
     }),
     session.signalStatus.subscribe(logSession),
@@ -247,6 +275,8 @@ export const attachTryItSession = (
 
   return () => {
     for (const unsubscribe of unsubscribes) unsubscribe();
+
+    session.emitter.off("close", onSessionClosed);
 
     if (options?.logRequests !== false) {
       session.emitter.off("request", onRequest);
@@ -596,7 +626,11 @@ export const OpenLvDappMonitor = ({
   const detachReference = useRef<(() => void) | undefined>(undefined);
 
   useEffect(() => {
-    if (!isConnected || connector?.type !== "openLv") {
+    if (
+      !isConnected
+      || connector?.type !== "openLv"
+      || typeof connector.getProvider !== "function"
+    ) {
       detachReference.current?.();
       detachReference.current = undefined;
 
@@ -656,7 +690,9 @@ export const OpenLvDappMonitor = ({
 
     let unwire: (() => void) | undefined;
 
-    wire().then((function_) => { unwire = function_; });
+    void (async () => {
+      unwire = await wire();
+    })();
 
     return () => {
       isCancelled = true;

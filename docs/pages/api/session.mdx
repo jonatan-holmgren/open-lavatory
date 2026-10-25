@@ -68,3 +68,28 @@ const peerInfo = session.peerInfo.get();
 
 The transport array passed to `createSession`/`connectSession` doubles as your preference list.
 During the handshake both peers exchange their supported transports and the first entry in the dApp's list that the wallet also supports is used — see [transport selection](/api/handshake#transport-selection).
+
+## Resuming after a reload
+
+`session.getConnectionParameters()` returns the complete pairing state, including private key material and replay counters. Treat it as a secret and store it only in storage appropriate for your application.
+
+After a fresh session connects, persist `getConnectionParameters()`. To resume, pass the saved value to `createSession` and provide `onConnectionParametersChange`; that synchronous callback must durably save every updated counter before the corresponding resume message is sent. If persistence fails, resumption aborts.
+
+```typescript
+const session = await createSession(
+  savedParameters,
+  [webrtc()],
+  onMessage,
+  {
+    onConnectionParametersChange(parameters) {
+      localStorage.setItem("openlv/session", JSON.stringify(parameters));
+    },
+  },
+);
+
+await session.connect();
+```
+
+`connectSession()` accepts a bootstrap URI and starts a fresh pairing; it does not restore saved connection parameters. Remove persisted state when the user disconnects.
+
+`session.close({ notifyPeer: false })` releases local resources without sending a protocol `close` message. Use it only to abandon a local attempt; a normal user disconnect should use `session.close()`.

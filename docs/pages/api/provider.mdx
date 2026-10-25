@@ -35,12 +35,14 @@ const chainId = await provider.request({ method: 'eth_chainId' })
 ## Parameters
 
 - `config?`: protocol defaults (signaling + transport)
-- `storage?`: custom storage backend (defaults to localStorage where available)
+- `storage?`: settings and saved-session backend (defaults to localStorage where available)
+- `sessionStorage?`: separate saved-session backend for per-tab isolation (defaults to sessionStorage when available)
 - `openModal?`: optional UI hook used by connector/modal integrations
 
 ## Provider helpers
 
 - `createSession(parameters?)`
+- `restoreSession()`: returns the current session if one exists; otherwise restores a saved pairing, rejecting if none is saved
 - `closeSession()`
 - `getAccounts()`
 - `status`
