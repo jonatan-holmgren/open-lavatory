@@ -1,16 +1,24 @@
 import { make, type Observable, observable, type PeerCapabilities } from "@openlv/core";
 import type { EncryptionKey, SymmetricKey } from "@openlv/core/encryption";
-import { parseEncryptionKey, validatePublicKeyHash } from "@openlv/core/encryption";
+import {
+  isSameEncryptionKey,
+  parseEncryptionKey,
+  validatePublicKeyHash,
+} from "@openlv/core/encryption";
 import { EventEmitter } from "eventemitter3";
 import { match } from "ts-pattern";
 
+import type { SignalingStage } from "./handshake.js";
 import { handshake, XR_H_PREFIX, XR_PREFIX } from "./handshake.js";
 import type { SignalMessage } from "./messages.js";
 import type { SignalingChannel } from "./protocol.js";
+import type { SignalingResumeConfig } from "./resume.js";
+import { createResumeController } from "./resume.js";
 import { log } from "./utils/log.js";
 
 export * from "./messages.js";
 export * from "./protocol.js";
+export type { SignalingResumeConfig, SignalingResumeState } from "./resume.js";
 
 export const Status = {
   STANDBY: "standby",
@@ -25,6 +33,10 @@ export type Status = (typeof Status)[keyof typeof Status];
 
 export type SignalEventMap = {
   message: (message: object) => void;
+  error: (reason: string, isPairingInvalidated?: boolean) => void;
+  // Emitted once an inbound or outbound resume has completed, so consumers
+  // can tear down and renegotiate the transport.
+  resume: () => void;
 };
 
 export type SignalingHooks = {
@@ -33,12 +45,19 @@ export type SignalingHooks = {
   k: SymmetricKey;
   // Our capabilities, advertised to the peer during the handshake
   capabilities: PeerCapabilities;
+  // Peer capabilities saved before a resume, reused until the peer re-announces.
+  initialPeerCapabilities?: PeerCapabilities;
   // Decrypt using our private key
   decrypt: (message: string) => Promise<string>;
   // Encrypt to relying party
   encrypt: (message: string) => Promise<string>;
   // our public key
   publicKey: EncryptionKey;
+  // Persisted peer key to authenticate a resumed session.
+  expectedPeerKey?: EncryptionKey;
+  // Durable pairing identity. When present the layer can resume the pairing;
+  // `initiate` also skips the fresh handshake.
+  resume?: SignalingResumeConfig;
   canEncrypt: () => boolean;
 };
 
@@ -48,6 +67,8 @@ export type SignalingContext = {
   // Sending only works once keys are exchanged
   send: (message: object) => Promise<void>;
   setup: () => Promise<void>;
+  // Initiate an authenticated resume of the configured pairing.
+  resume: () => Promise<void>;
   teardown: () => Promise<void>;
 
   status: Observable<Status>;
@@ -74,17 +95,41 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
     encrypt,
     decrypt,
     capabilities,
+    initialPeerCapabilities,
     h,
     k: handshakeKey,
     publicKey,
+    expectedPeerKey,
+    resume: resumeConfig,
     isHost,
   } = hooks;
 
   const [status, setStatus] = observable<Status>(Status.STANDBY);
   const [peerKey, setPeerKey] = observable<EncryptionKey | undefined>(undefined);
-  const [peerCapabilities, setPeerCapabilities] = observable<PeerCapabilities | undefined>(undefined);
+  const [peerCapabilities, setPeerCapabilities] = observable<PeerCapabilities | undefined>(initialPeerCapabilities);
 
   const emitter = new EventEmitter<SignalEventMap>();
+  let isStopped = false;
+
+  const fail = (reason: string, isPairingInvalidated = false) => {
+    if (isStopped || status.get() === Status.ERROR) return;
+
+    isStopped = true;
+    resumeController?.teardown();
+    setPeerKey(undefined);
+    setPeerCapabilities(undefined);
+    log(reason);
+    emitter.emit("error", reason, isPairingInvalidated);
+    setStatus(Status.ERROR);
+  };
+
+  const requireActive = () => {
+    if (status.get() === Status.ERROR) {
+      throw new Error("Signaling failed; pair again before reconnecting");
+    }
+
+    if (isStopped) throw new Error("Signaling has been torn down");
+  };
 
   const { frame, parse } = handshake({
     isHost,
@@ -93,7 +138,33 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
     decrypt,
   });
 
-  const send = async (method: "handshake" | "encrypted", payload: SignalMessage) => await channel.publish(await frame(method, payload));
+  const send = async (method: "handshake" | "encrypted", payload: SignalMessage) => {
+    requireActive();
+
+    const framed = await frame(method, payload);
+
+    requireActive();
+    await channel.publish(framed);
+  };
+
+  const resumeController = resumeConfig
+    ? createResumeController({
+        config: resumeConfig,
+        publicKey,
+        expectedPeerKey,
+        getPeerKey: () => peerKey.get(),
+        acceptPeerKey: setPeerKey,
+        onResumed: () => {
+          // Emit before flipping status so consumers can create a transport
+          // before the ENCRYPTED handler runs.
+          emitter.emit("resume");
+
+          if (!isStopped) setStatus(Status.ENCRYPTED);
+        },
+        onFailure: fail,
+        send: message => send("encrypted", message),
+      })
+    : undefined;
 
   const capabilitiesMessage = (): SignalMessage => ({
     type: "capabilities",
@@ -107,50 +178,82 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
   });
 
   const handleHandshakeFrame = async (message: SignalMessage) => {
+    if (expectedPeerKey || resumeController?.initiate || peerKey.get()) return;
+
     await match({ msg: message, status: status.get(), isHost })
-      .with({ msg: { type: "flash" }, status: Status.READY, isHost: true }, async () => {
+      .with({ msg: { type: "flash" }, isHost: true }, async () => {
         setStatus(Status.HANDSHAKE);
         await send("handshake", pubkeyMessage());
       })
-      .with({ msg: { type: "pubkey" }, status: Status.HANDSHAKE, isHost: false }, async ({ msg: { payload: messagePayload } }) => {
-        let receivedKey: EncryptionKey;
+      .with(
+        { msg: { type: "pubkey" }, isHost: false, status: Status.HANDSHAKE },
+        async ({ msg: { payload: messagePayload } }) => {
+          let receivedKey: EncryptionKey;
 
-        try {
-          receivedKey = await parseEncryptionKey(messagePayload.publicKey);
+          try {
+            receivedKey = await parseEncryptionKey(messagePayload.publicKey);
 
-          if (!await validatePublicKeyHash(receivedKey, h)) {
-            setStatus(Status.ERROR);
-            log("Received host public key does not match expected hash -- possible tampering");
+            if (!await validatePublicKeyHash(receivedKey, h)) {
+              fail("Received host public key does not match expected hash; pair again", true);
+
+              return;
+            }
+          }
+          catch {
+            fail("Failed to parse received host public key; pair again", true);
 
             return;
           }
-        }
-        catch {
-          setStatus(Status.ERROR);
-          log("Failed to parse received host public key");
 
-          return;
-        }
+          if (isStopped || status.get() !== Status.HANDSHAKE) return;
 
-        const changed = setPeerKey(receivedKey)
-          && setStatus(Status.HANDSHAKE_PARTIAL);
+          if (!setPeerKey(receivedKey)) return;
 
-        if (!changed) return;
+          if (!setStatus(Status.HANDSHAKE_PARTIAL)) return;
 
-        return await send("encrypted", pubkeyMessage());
-      })
+          return await send("encrypted", pubkeyMessage());
+        },
+      )
       .otherwise(() => {
         log("Ignoring handshake frame", message.type, "in status", status.get());
       });
   };
 
   const handleEncryptedFrame = async (message: SignalMessage) => {
+    // Once a saved pairing pins the peer key, bootstrap frames must not be able
+    // to bypass authenticated resumption.
+    if (
+      expectedPeerKey
+      && (message.type === "pubkey" || message.type === "capabilities")
+    ) {
+      log("Ignoring bootstrap frame for pinned pairing", message.type);
+
+      return;
+    }
+
     await match({ msg: message, status: status.get(), isHost })
       // Host: client responded with its public key.
       .with(
         { msg: { type: "pubkey" }, isHost: true, status: Status.HANDSHAKE },
         async ({ msg: { payload: messagePayload } }) => {
-          const receivedKey = await parseEncryptionKey(messagePayload.publicKey);
+          let receivedKey: EncryptionKey;
+
+          try {
+            receivedKey = await parseEncryptionKey(messagePayload.publicKey);
+          }
+          catch {
+            fail("Failed to parse received client public key; pair again", true);
+
+            return;
+          }
+
+          if (isStopped || status.get() !== Status.HANDSHAKE) return;
+
+          if (expectedPeerKey && !isSameEncryptionKey(receivedKey, expectedPeerKey)) {
+            fail("Received client public key does not match saved pairing; pair again", true);
+
+            return;
+          }
 
           if (!setPeerKey(receivedKey)) return;
 
@@ -162,7 +265,9 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
       .with(
         { msg: { type: "capabilities" }, status: Status.HANDSHAKE_PARTIAL },
         async ({ msg: { payload: messagePayload } }) => {
-          await setPeerCapabilities(messagePayload);
+          if (!peerKey.get()) return;
+
+          setPeerCapabilities(messagePayload);
           setStatus(Status.ENCRYPTED);
 
           if (isHost) return;
@@ -180,34 +285,60 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
       .with({ msg: { type: "data" }, status: Status.ENCRYPTED }, async () => {
         emitter.emit("message", message.payload as object);
       })
+      // A resume may arrive in any stage: an already-ENCRYPTED peer must
+      // still accept a restarting peer and renegotiate the transport.
+      .with({ msg: { type: "resume" } }, async ({ msg }) => await resumeController?.handleResume(msg))
+      .with({ msg: { type: "resume-ack" } }, async ({ msg }) => await resumeController?.handleResumeAck(msg))
+      .with({ msg: { type: "resume-confirm" } }, async ({ msg }) => await resumeController?.handleResumeConfirm(msg))
       .otherwise(() => {
         log("Ignoring encrypted frame", message.type, "in status", status.get());
       });
   };
 
   const onReceive = async (payload: string) => {
+    if (isStopped || status.get() === Status.ERROR) return;
+
+    let parsed: [SignalingStage, SignalMessage] | undefined;
+
     try {
-      const parsed = await parse(payload);
+      parsed = await parse(payload);
+    }
+    catch (error) {
+      log("Dropping undecryptable or malformed frame", error);
 
-      if (!parsed) return;
+      return;
+    }
 
-      const [stage, message] = parsed;
+    if (!parsed || isStopped || status.get() === Status.ERROR) return;
 
-      if (stage === XR_H_PREFIX && message) return await handleHandshakeFrame(message);
+    const [stage, message] = parsed;
 
-      if (stage === XR_PREFIX && message) return await handleEncryptedFrame(message);
+    try {
+      if (stage === XR_H_PREFIX) return await handleHandshakeFrame(message);
+
+      if (stage === XR_PREFIX) return await handleEncryptedFrame(message);
 
       log("Dropping frame with unknown prefix");
     }
     catch (error) {
-      log("Dropping undecryptable or malformed frame", error);
+      if (!isStopped) {
+        const reason = error instanceof Error ? error.message : String(error);
+
+        fail(`Signaling message handling failed: ${reason}`);
+      }
     }
   };
 
   const setup = async () => {
+    requireActive();
     setStatus(Status.CONNECTING);
     await channel.setup();
+
+    if (isStopped) return;
+
     await channel.subscribe(onReceive);
+
+    if (isStopped) return;
 
     if (canEncrypt()) {
       setStatus(Status.ENCRYPTED);
@@ -216,6 +347,12 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
     }
 
     setStatus(Status.READY);
+
+    if (resumeController?.initiate) {
+      // Resume is initiated explicitly so both peers are subscribed first;
+      // the fresh handshake must not run for a resumed pairing.
+      return;
+    }
 
     if (!isHost) {
       // Enter HANDSHAKE before publishing: the host's pubkey reply can
@@ -231,14 +368,35 @@ export const createSignalingLayer: CreateSignalingLayerFunction = channel => asy
 
   const teardown = async () => {
     log("teardown");
+    isStopped = true;
+    resumeController?.teardown();
     await channel.teardown?.();
+  };
+
+  const resume = async () => {
+    requireActive();
+
+    if (!resumeController) {
+      throw new Error("No pairing state available to resume");
+    }
+
+    if (status.get() !== Status.ENCRYPTED) {
+      setStatus(Status.HANDSHAKE_PARTIAL);
+    }
+
+    await resumeController.resume();
   };
 
   return make(emitter, {
     type: channel.type,
     setup,
+    resume,
     teardown,
     send(message: object) {
+      if (isStopped || status.get() === Status.ERROR) {
+        return Promise.reject(new Error("Signaling failed or closed; pair again before sending"));
+      }
+
       if (!canEncrypt()) {
         return Promise.reject(
           new Error("Cannot encrypt message before keys are exchanged"),
