@@ -3,6 +3,7 @@ import {
   encodeConnectionURL,
   type Observable,
   observable,
+  type PeerInfo,
   type SessionLinkParameters,
 } from "@openlv/core";
 import {
@@ -10,7 +11,6 @@ import {
   type Session,
   SessionStatus,
 } from "@openlv/session";
-import type { PeerInfo } from "@openlv/signaling";
 import type { TransportProtocol } from "@openlv/transport";
 import { webrtc, type WebRTCConfig } from "@openlv/transport/webrtc";
 import { Provider as OxProvider } from "ox";

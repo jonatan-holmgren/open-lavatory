@@ -2,6 +2,10 @@ import type { SessionHandshakeParameters } from "../session.js";
 
 export const OPENLV_PROTOCOL_VERSION = 1;
 
+export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/;
+export const PUBLIC_KEY_HASH_PATTERN = /^[0-9a-f]{16}$/;
+export const HANDSHAKE_KEY_PATTERN = /^[0-9a-f]{32}$/;
+
 export const encodeConnectionURL = (payload: SessionHandshakeParameters) => {
   const parameters = new URLSearchParams();
 
@@ -52,7 +56,7 @@ export const decodeConnectionURL = (
     }
 
     // Validate session ID format (16 characters, URL-safe alphabet)
-    if (!/^[A-Za-z0-9_-]{16}$/.test(sessionId)) {
+    if (!SESSION_ID_PATTERN.test(sessionId)) {
       throw new Error(
         "Invalid session ID format: must be 16 URL-safe characters",
       );
@@ -63,7 +67,7 @@ export const decodeConnectionURL = (
     }
 
     // Validate public key hash format (16 hex characters)
-    if (!/^[0-9a-f]{16}$/.test(h)) {
+    if (!PUBLIC_KEY_HASH_PATTERN.test(h)) {
       throw new Error(
         "Invalid public key hash format: must be 16 hex characters",
       );
@@ -74,7 +78,7 @@ export const decodeConnectionURL = (
     }
 
     // Validate shared key format (32 hex characters)
-    if (!/^[0-9a-f]{32}$/.test(k)) {
+    if (!HANDSHAKE_KEY_PATTERN.test(k)) {
       throw new Error("Invalid shared key format: must be 32 lowercase hex characters");
     }
 
@@ -94,6 +98,7 @@ export const decodeConnectionURL = (
     // Strip query string so handshake secrets (k) are not exposed in error messages
     const safeUrl = url.includes("?") ? url.slice(0, url.indexOf("?")) + "?[redacted]" : url;
 
+    // eslint-disable-next-line preserve-caught-error -- The original URL error retains secret input.
     throw new Error(`Failed to parse URL: ${safeUrl}. Original error: ${errorMessage}`);
   }
 };
