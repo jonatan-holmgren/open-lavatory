@@ -1,6 +1,7 @@
 import type { OpenLVModalElementProperties } from "@openlv/modal";
 import {
   createProvider,
+  hasRestorableSession,
   type OpenLVProvider,
   type OpenLVProviderParameters,
   ProviderStatus,
@@ -13,7 +14,7 @@ import { log } from "./log.js";
 import { getTriggerModal } from "./modal.js";
 
 export type OpenLVConnectorParameters = Prettify<
-  Pick<OpenLVProviderParameters, "config" | "storage">
+  Pick<OpenLVProviderParameters, "config" | "storage" | "sessionStorage">
   & Pick<OpenLVModalElementProperties, "theme">
 >;
 
@@ -29,18 +30,15 @@ export type OpenLVConnector = CreateConnectorFn<
  */
 export const openlv = ({
   storage,
+  sessionStorage,
   config = {},
   theme,
 }: OpenLVConnectorParameters = {}) => {
   const provider = createProvider({
     storage,
+    sessionStorage,
     config,
   });
-
-  const onDisconnect = async () => {
-    log("onDisconnect called");
-    await provider.closeSession();
-  };
 
   const getAccounts = async () => {
     log("getAccounts");
@@ -54,6 +52,11 @@ export const openlv = ({
 
   return createConnector<OpenLVProvider>((wagmiConfig) => {
     const { chains } = wagmiConfig;
+    const onProviderDisconnect = () => {
+      log("onDisconnect called");
+      provider.off("disconnect", onProviderDisconnect);
+      wagmiConfig.emitter.emit("disconnect");
+    };
 
     const connect = async (
       { withCapabilities = false },
@@ -86,6 +89,9 @@ export const openlv = ({
       const chainIdHex = await provider.request({ method: "eth_chainId" });
       const chainId = Number.parseInt(chainIdHex as string, 16);
 
+      provider.off("disconnect", onProviderDisconnect);
+      provider.on("disconnect", onProviderDisconnect);
+
       log("completing connect() call with chainId", chainId);
 
       return {
@@ -105,7 +111,10 @@ export const openlv = ({
       connect,
       async disconnect() {
         log("disconnect");
-        await onDisconnect();
+
+        provider.off("disconnect", onProviderDisconnect);
+
+        await provider.closeSession();
       },
       getAccounts,
       /**
@@ -114,6 +123,13 @@ export const openlv = ({
        */
       async isAuthorized() {
         log("isAuthorized");
+
+        if (hasRestorableSession(provider.storage)) {
+          await provider.status.until(providerStatus =>
+            providerStatus === ProviderStatus.CONNECTED
+            || providerStatus === ProviderStatus.ERROR,
+          );
+        }
 
         const accounts = await getAccounts();
 
@@ -144,7 +160,7 @@ export const openlv = ({
       getProvider: async () => provider,
       onAccountsChanged: () => log("onAccountsChanged"),
       onChainChanged: () => log("onChainChanged"),
-      onDisconnect,
+      onDisconnect: onProviderDisconnect,
     };
   });
 };
