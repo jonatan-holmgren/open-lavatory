@@ -54,6 +54,14 @@ const getStorage = () => {
   return globalThis.localStorage;
 };
 
+const getSessionStorage = () => {
+  if (globalThis.window === undefined) return;
+
+  if (!("sessionStorage" in globalThis)) return;
+
+  return globalThis.sessionStorage;
+};
+
 export type ProviderStorageR = {
   emitter: EventEmitter<{
     settings_change: (settings: ProviderStorage) => void;
@@ -81,7 +89,7 @@ export const createProviderStorage = ({
 }: ProviderStorageParameters): ProviderStorageR => {
   const io = storage ?? getStorage() ?? createPassthrough();
   // Settings and sessions may live in different backends (per-tab sessions).
-  const sessionIo = sessionStorage ?? io;
+  const sessionIo = sessionStorage ?? getSessionStorage() ?? io;
   const initialSettings = io.getItem(DEFAULT_STORAGE_KEY);
 
   let settings: ProviderStorage = initialSettings
