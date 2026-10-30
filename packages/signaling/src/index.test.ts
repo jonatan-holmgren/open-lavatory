@@ -1,12 +1,11 @@
-import { deriveSymmetricKey, generateKeyPair } from "@openlv/core/encryption";
-import { describe, expect, it } from "vitest";
+import { deriveSymmetricKey, generateKeyPair, hashPublicKey } from "@openlv/core/encryption";
+import { describe, expect, it, vi } from "vitest";
 
 import { mqtt } from "./mqtt/index.js";
 import { ntfy } from "./ntfy/index.js";
 import type { SignalingProtocol, SignalingProtocolOptions } from "./protocol.js";
 import { log } from "./utils/log.js";
 
-const hKey = "test";
 const K = "00112233445566778899aabbccddeeff";
 
 const providersByType: readonly [
@@ -82,8 +81,9 @@ const testSignalingLayer = async (
   layer: SignalingProtocol,
   properties: SignalingProtocolOptions,
 ): Promise<void> => {
-  const { encryptionKey: publicKey, decryptionKey } = await generateKeyPair();
-  const h = hKey;
+  const host = await generateKeyPair();
+  const client = await generateKeyPair();
+  const h = await hashPublicKey(host.encryptionKey);
   const k = await deriveSymmetricKey(K);
 
   const signalingLayer = await layer(properties);
@@ -91,10 +91,9 @@ const testSignalingLayer = async (
     h,
     k,
     capabilities: { transports: ["wrtc"] },
-    canEncrypt: () => true,
-    encrypt: publicKey.encrypt,
-    decrypt: decryptionKey.decrypt,
-    publicKey,
+    sessionId: "mytesttopic1111",
+    secretKey: host.decryptionKey.toString(),
+    publicKey: host.encryptionKey,
     isHost: true,
   });
 
@@ -105,10 +104,9 @@ const testSignalingLayer = async (
     h,
     k,
     capabilities: { transports: ["wrtc"] },
-    canEncrypt: () => true,
-    encrypt: publicKey.encrypt,
-    decrypt: decryptionKey.decrypt,
-    publicKey,
+    sessionId: "mytesttopic1111",
+    secretKey: client.decryptionKey.toString(),
+    publicKey: client.encryptionKey,
     isHost: false,
   });
 
@@ -119,6 +117,10 @@ const testSignalingLayer = async (
   expect(signalB).toBeDefined();
 
   await Promise.all([signalA.setup(), signalB.setup()]);
+  await vi.waitFor(() => {
+    expect(signalA.status.get()).toBe("encrypted");
+    expect(signalB.status.get()).toBe("encrypted");
+  }, { timeout: 4000 });
 
   const messageReceivedA = new Promise<void>((resolve) => {
     signalA.on("message", (message) => {

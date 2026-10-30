@@ -25,4 +25,12 @@ describe("Handshake", async () => {
 
     await expect(rederived.decrypt(encrypted)).resolves.toBe("hello");
   });
+
+  test("supports saved 32-byte secrets and authenticates frame headers", async () => {
+    const key = await deriveSymmetricKey("ab".repeat(32));
+    const ciphertext = await key.encrypt("hello", "hc");
+
+    await expect(key.decrypt(ciphertext, "hh")).rejects.toThrow();
+    await expect(key.decrypt(ciphertext, "hc")).resolves.toBe("hello");
+  });
 });

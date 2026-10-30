@@ -1,9 +1,11 @@
 import { bytesToHex, hexToBytes } from "@noble/ciphers/utils.js";
 
+import { fromBase64, toBase64 } from "./base64.js";
+
 export type SymmetricKey = {
   toString: () => string;
-  encrypt: (message: string) => Promise<string>;
-  decrypt: (message: string) => Promise<string>;
+  encrypt: (message: string, header?: string) => Promise<string>;
+  decrypt: (message: string, header?: string) => Promise<string>;
 };
 
 const HANDSHAKE_KEY_BYTES = 16;
@@ -12,10 +14,8 @@ const IV_BYTES = 12;
 export const deriveSymmetricKey = async (k: string): Promise<SymmetricKey> => {
   const baseKey = Uint8Array.from(hexToBytes(k));
 
-  if (baseKey.length !== HANDSHAKE_KEY_BYTES) {
-    throw new Error(
-      `Handshake key must be ${HANDSHAKE_KEY_BYTES} bytes, got ${baseKey.length}`,
-    );
+  if (baseKey.length !== HANDSHAKE_KEY_BYTES && baseKey.length !== 32) {
+    throw new Error("Handshake key must be 16 or 32 bytes");
   }
 
   const sharedSecret = await crypto.subtle.importKey(
@@ -28,10 +28,10 @@ export const deriveSymmetricKey = async (k: string): Promise<SymmetricKey> => {
 
   return {
     toString: () => k,
-    encrypt: async (message: string) => {
+    encrypt: async (message: string, header = "") => {
       const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
       const encrypted = await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv },
+        { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(header) },
         sharedSecret,
         new TextEncoder().encode(message),
       );
@@ -40,18 +40,14 @@ export const deriveSymmetricKey = async (k: string): Promise<SymmetricKey> => {
       combined.set(iv);
       combined.set(new Uint8Array(encrypted), iv.length);
 
-      return btoa(String.fromCharCode.apply(null, Array.from(combined)));
+      return toBase64(combined);
     },
-    decrypt: async (message: string) => {
-      const combined = new Uint8Array(
-        atob(message)
-          .split("")
-          .map(char => char.codePointAt(0)!),
-      );
+    decrypt: async (message: string, header = "") => {
+      const combined = fromBase64(message);
       const iv = combined.slice(0, IV_BYTES);
       const encrypted = combined.slice(IV_BYTES);
       const decrypted = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv },
+        { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(header) },
         sharedSecret,
         encrypted,
       );

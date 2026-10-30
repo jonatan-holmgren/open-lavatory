@@ -82,8 +82,7 @@ Implementations MAY expose local defaults, but interoperable peers MUST NOT assu
 
 `k` provides the shared symmetric key material used for the initial signaling stage before peer public keys have been exchanged.
 
-`h` commits the URI to the advertising peer public key.
-`h` is the first 16 characters of the lowercase hex encoding of the SHA-256 digest of the 32-byte X25519 public key.
+`h` is the first 16 lowercase hex characters of the SHA-256 digest of the advertising peer's 32-byte X25519 public key.
 The joining peer MUST compute `h` from the public key it receives in `pubkey`, and MUST abort the handshake if the result differs from the `h` in the URI.
 
 In the current interoperable behavior, `k` is hex-decoded and imported as symmetric handshake key material.
@@ -100,13 +99,7 @@ This specification is designed to operate over general-purpose signaling service
 
 ### Signaling Model
 
-The signaling layer begins with messages encrypted under `k`.
-Once the peers have exchanged public keys, signaling continues using peer public-key encryption.
-
-Version 1 therefore uses two signaling encryption modes:
-
-- handshake-key encryption for early bootstrap messages
-- peer public-key encryption after public key exchange
+The signaling layer begins with messages encrypted under the invitation key `k`. Peers derive directional session keys from their X25519 static key agreement, the bootstrap secret, both public keys, the session ID, roles, and fresh nonces from both peers. Subsequent signaling and transport traffic uses these peer-bound keys.
 
 ### Signaling Frame Format
 
@@ -123,7 +116,7 @@ Each signaling frame is serialized as:
 Version 1 defines:
 
 - `h` as the handshake-key encrypted frame prefix
-- `x` as the peer-key encrypted frame prefix
+- `x` as the peer-bound session-key encrypted frame prefix
 - `h` as the advertising-peer recipient marker
 - `c` as the joining-peer recipient marker
 
@@ -171,15 +164,13 @@ Relays cap message size, so `icon` SHOULD NOT exceed 8192 characters, a limit th
 
 The version 1 handshake sequence is:
 
-1. The joining peer sends `flash` to the advertising peer using a handshake-key encrypted frame.
-2. The advertising peer sends `pubkey` to the joining peer using a handshake-key encrypted frame.
-3. The joining peer records the advertising peer public key and sends `pubkey` using a peer public-key encrypted frame.
-4. The advertising peer records the joining peer public key and sends `capabilities` using a peer public-key encrypted frame. This message doubles as the delivery receipt for the joining peer's `pubkey`.
-5. The joining peer records the advertising peer capabilities and sends `capabilities` using a peer public-key encrypted frame. This message doubles as the delivery receipt for the advertising peer's `capabilities`.
-6. Both peers treat subsequent signaling data as peer public-key encrypted.
+1. The joining peer sends `flash` with a fresh 16-byte nonce encoded as 32 lowercase hex characters under the bootstrap key.
+2. The advertising peer sends `pubkey` containing its serialized X25519 public key, the client nonce and a fresh host nonce under the bootstrap key.
+3. The joining peer verifies the host key against `h` and sends its own `pubkey`, with both nonces, under the bootstrap key.
+4. Both peers derive directional session keys. The host sends `capabilities` under its signaling send key; the client verifies it and sends its own `capabilities` under its signaling send key.
+5. A peer accepts the other only after receiving its authenticated capabilities. Subsequent signaling data uses the established session keys.
 
-Signaling infrastructure is lossy, so each handshake step MAY be re-sent until the next inbound message confirms progress; receivers MUST treat duplicate deliveries as no-ops. A joining peer that continues to receive `capabilities` after completing the handshake MUST answer each duplicate, since its own final message may have been lost.
-
+Signaling is lossy. Implementations retransmit the same handshake frame every two seconds and respond to valid duplicates with the cached response. A client whose final capabilities were lost answers a duplicate host capabilities frame with the same cached ciphertext.
 After the handshake, signaling application payloads MUST be carried in `data` messages inside peer public-key encrypted frames.
 
 ### Transport Selection
@@ -265,43 +256,30 @@ Either peer MAY end the session by sending `{ "type": "close" }` before it close
 A `close` has no `messageId` and is not acknowledged.
 After a peer sends or receives `close`, it MUST NOT send further session messages and MUST fail its open requests.
 
+
 ### Session Resumption
 
-Peers MAY persist session state locally to support later resumption.
-Persisted state SHOULD include `sessionId`, `p`, `s`, `k`, session X25519 key pair, peer public key, and transport configuration.
+Peers MAY persist the session ID, signaling parameters, local static keypair, pinned remote public key, selected transport, invitation key and separate resumption secret. These are sensitive credentials.
 
-Resumption in version 1 means re-invoking communication using prior local session material.
-It does not guarantee transport continuity.
-Implementations MAY need to reconnect to the signaling infrastructure, re-establish peer public-key signaling, and renegotiate transport.
+To resume, peers perform the same `flash`/`pubkey`/`capabilities` exchange with fresh host and client nonces, using the saved resumption secret for bootstrap and key derivation. They MUST verify the received public key against the pinned peer key. A failed resumption MUST NOT fall back to fresh pairing; a new pairing requires a new out-of-band invitation.
+
+The resumption secret is derived from the original key agreement and invitation key, so the invitation alone cannot resume an existing pairing. The same secret is retained across successful resumes.
 
 ### Cryptography
 
-`openlv` uses a two-stage encryption model during session establishment.
+Bootstrap messages use AES-GCM with a fresh random 12-byte IV and the hex-decoded bootstrap secret as the key: 16 bytes for initial pairing, 32 bytes for resumption. The UTF-8 signaling prefix and recipient are authenticated as associated data. Ciphertext is serialized as `base64(iv || ciphertext || tag)`.
 
-The initial signaling stage uses the pre-shared key `k` from the session URI.
-This key is used only before peers have exchanged public keys, and allows the first bootstrap messages to be encrypted over untrusted signaling infrastructure.
-For current interoperability, the 32-character hexadecimal `k` value is hex-decoded to 16 bytes and imported as an AES-GCM key.
-
-Handshake encryption uses the Web Crypto API AES-GCM implementation with a fresh 12-byte random IV per message.
-The serialized encrypted payload is:
+For peer-bound keys, compute X25519 between the local static secret and pinned remote public key; reject invalid, low-order or all-zero shared secrets. Concatenate this 32-byte shared value and the hex-decoded bootstrap secret as HKDF input key material. HKDF-SHA256 uses 32 zero bytes as salt and derives 32 bytes per key. Its UTF-8 `info` is:
 
 ```text
-base64(iv || ciphertext)
+JSON.stringify(["openlv peer keys", 1, sessionId, "host", hostPublicKey, "client", clientPublicKey, purpose, hostNonce, clientNonce])
 ```
 
-After public keys are exchanged, signaling switches to peer public-key encryption.
-Each peer generates an asymmetric encryption keypair and encrypts to the other peer's public key.
-In the current implementation, this mechanism uses X25519 key agreement (`@noble/curves`) and XSalsa20-Poly1305 authenticated encryption (`@noble/ciphers`), with an ephemeral sender key for each encrypted message.
+Public keys are canonical Base64-encoded raw X25519 keys; nonces are lowercase hex. The four `purpose` values are `signaling:host-to-client`, `signaling:client-to-host`, `transport:host-to-client`, and `transport:client-to-host`.
 
-Peer-encrypted payloads are serialized as:
+The original pairing derives its 32-byte resumption secret using the same input and salt, with `purpose` set to `resumption` and both nonce fields omitted from the JSON array. On resumption the saved resumption secret is retained.
 
-```text
-base64(ephemeralPublicKey || nonce || ciphertext)
-```
-
-This same peer-key mechanism is also used to protect payloads exchanged through the negotiated transport layer.
-
-These cryptographic mechanisms define the current interoperable behavior, but future revisions MAY define alternative suites or explicit cryptographic negotiation.
+Session frames use AES-256-GCM. Each directional key has a 64-bit counter starting at zero; its 12-byte IV is four zero bytes followed by the counter in big-endian order. Signaling authenticates the UTF-8 prefix and recipient as associated data. Frames are `base64(iv || ciphertext || tag)`. A sender MUST NOT reuse a counter with a key or send after exhaustion. A receiver MUST authenticate before recording a counter and reject duplicates and frames outside a 256-message replay window.
 
 ## Rationale
 
@@ -374,7 +352,8 @@ Implementations MUST use fresh randomness for IVs, nonces, ephemeral keys, and g
 Signaling infrastructure is untrusted and can observe metadata such as timing, size, and namespace.
 Implementations SHOULD validate decrypted JSON structure and expected message types before acting on payloads.
 Implementations SHOULD apply request timeouts and resource limits.
-Replay protection is not fully standardized in version 1 and SHOULD be improved in future revisions.
+
+Fresh nonces and authenticated counters prevent replay across handshakes and within a session. The static X25519 key agreement does not provide forward secrecy, which is acceptable for the intended use case of wallet-dapp connectivity, given that the session is short-lived and the bootstrap secret is ephemeral.
 
 Persisted session state is sensitive and SHOULD be stored using the strongest platform protections available.
 Implementations SHOULD allow users to disconnect and delete saved session state.

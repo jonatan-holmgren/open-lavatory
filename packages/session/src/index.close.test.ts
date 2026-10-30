@@ -1,0 +1,217 @@
+import { observable, type PeerCapabilities } from "@openlv/core";
+import type { EncryptionKey } from "@openlv/core/encryption";
+import {
+  type SignalingLayer,
+  Status as SignalingStatus,
+} from "@openlv/signaling";
+import {
+  Status as TransportStatus,
+  type TransportLayerFunction,
+  type TransportLayerParameters,
+} from "@openlv/transport";
+import { EventEmitter } from "eventemitter3";
+import { describe, expect, it, vi } from "vitest";
+
+const { loadSignaling } = vi.hoisted(() => ({ loadSignaling: vi.fn() }));
+
+vi.mock("./dynamic.js", () => ({
+  loadSignaling,
+  loadTransport: vi.fn(),
+}));
+
+import { createSession, SessionStatus } from "./index.js";
+
+const identityChannel = {
+  encrypt: async (message: string) => message,
+  decrypt: async (message: string) => message,
+};
+
+const createConnectedSession = async (options: {
+  setup?: () => Promise<void>;
+  teardown?: () => Promise<void>;
+} = {}) => {
+  const sent: object[] = [];
+  const teardownTransport = vi.fn(async () => {
+    await options.teardown?.();
+  });
+  let receive: ((message: { type: string; payload?: unknown; messageId?: string; }) => void) | undefined;
+  let transportParameters: TransportLayerParameters | undefined;
+
+  const [transportStatus, setTransportStatus] = observable<TransportStatus>(TransportStatus.STANDBY);
+  const [signalStatus, setSignalStatus] = observable<SignalingStatus>(SignalingStatus.STANDBY);
+  const [peerKey, setPeerKey] = observable<EncryptionKey | undefined>(undefined);
+  const [peerCapabilities] = observable<PeerCapabilities | undefined>({ transports: ["wrtc"] });
+  const publicKey = {
+    toString: () => "pinned-peer",
+    encrypt: async () => "",
+  } as EncryptionKey;
+  const signaling: SignalingLayer = Object.assign(new EventEmitter(), {
+    status: signalStatus,
+    peerKey,
+    peerCapabilities,
+    setup: async () => {
+      setPeerKey(publicKey);
+      signaling.emit("handshake", {
+        peerKey: publicKey,
+        peerCapabilities: { transports: ["wrtc"] },
+        transport: { send: identityChannel, receive: identityChannel },
+        resumptionSecret: "0".repeat(64),
+      }, false);
+      setSignalStatus(SignalingStatus.ENCRYPTED);
+    },
+    resume: async () => {},
+    teardown: vi.fn(async () => {}),
+    send: vi.fn(async () => {}),
+  }) as unknown as SignalingLayer;
+
+  const createSignal = async () => signaling;
+
+  loadSignaling.mockResolvedValue(async () => createSignal);
+
+  const transport: TransportLayerFunction = {
+    transportId: "wrtc",
+    create: (parameters) => {
+      transportParameters = parameters;
+      receive = parameters.onmessage;
+
+      return {
+        type: "wrtc",
+        setup: async () => {
+          await options.setup?.();
+          setTransportStatus(TransportStatus.CONNECTED);
+        },
+        teardown: teardownTransport,
+        send: async (message) => { sent.push(message); },
+        handle: async () => {},
+        emitter: new EventEmitter(),
+        status: transportStatus,
+      };
+    },
+  };
+
+  const session = await createSession(
+    { p: "ntfy", s: "https://ntfy.sh/" },
+    [transport],
+    async () => ({}),
+  );
+
+  await session.connect();
+  await session.status.until(status => status === SessionStatus.CONNECTED);
+
+  return { session, signaling, sent, receive, teardownTransport, setTransportStatus, getTransportParameters: () => transportParameters! };
+};
+
+it("uses the latest authenticated transport channels after a handshake", async () => {
+  const { session, signaling, getTransportParameters } = await createConnectedSession();
+  const parameters = getTransportParameters();
+  const encrypt = vi.fn(async (message: string) => `sealed:${message}`);
+  const decrypt = vi.fn(async (message: string) => `opened:${message}`);
+
+  signaling.emit("handshake", {
+    peerKey: signaling.peerKey.get()!,
+    peerCapabilities: { transports: ["wrtc"] },
+    transport: { send: { encrypt, decrypt }, receive: { encrypt, decrypt } },
+    resumptionSecret: "0".repeat(64),
+  }, true);
+
+  await expect(parameters.encrypt("request")).resolves.toBe("sealed:request");
+  await expect(parameters.decrypt("response")).resolves.toBe("opened:response");
+  expect(encrypt).toHaveBeenCalledExactlyOnceWith("request");
+  expect(decrypt).toHaveBeenCalledExactlyOnceWith("response");
+  await session.close({ notifyPeer: false });
+});
+
+describe("session close envelope", () => {
+  it("sends an unacknowledged close before local teardown", async () => {
+    const { session, sent, teardownTransport } = await createConnectedSession();
+
+    const closed = vi.fn();
+
+    session.emitter.on("close", closed);
+    await session.close();
+
+    expect(sent).toEqual([{ type: "close" }]);
+    expect(teardownTransport).toHaveBeenCalledOnce();
+    expect(session.status.get()).toBe(SessionStatus.DISCONNECTED);
+    await session.close({ notifyPeer: false });
+    expect(closed).toHaveBeenCalledExactlyOnceWith(undefined, false);
+  });
+
+  it("tears down on a received close without sending an acknowledgement", async () => {
+    const { session, sent, receive, teardownTransport } = await createConnectedSession();
+
+    receive?.({ type: "close" });
+    await session.close({ notifyPeer: false });
+
+    expect(sent).toEqual([]);
+    expect(teardownTransport).toHaveBeenCalledOnce();
+  });
+
+  it("keeps transport interruptions recoverable without emitting terminal closure", async () => {
+    const { session, signaling, setTransportStatus } = await createConnectedSession();
+    const closed = vi.fn();
+
+    session.emitter.on("close", closed);
+    setTransportStatus(TransportStatus.ERROR);
+    expect(session.status.get()).toBe(SessionStatus.DISCONNECTED);
+    expect(closed).not.toHaveBeenCalled();
+
+    signaling.emit("handshake", {
+      peerKey: signaling.peerKey.get()!,
+      peerCapabilities: { transports: ["wrtc"] },
+      transport: { send: identityChannel, receive: identityChannel },
+      resumptionSecret: "0".repeat(64),
+    }, true);
+    await session.status.until(status => status === SessionStatus.CONNECTED);
+    expect(closed).not.toHaveBeenCalled();
+    await session.close({ notifyPeer: false });
+    expect(closed).toHaveBeenCalledExactlyOnceWith(undefined, false);
+  });
+
+  it.each(["setup", "teardown"])("does not revive a closed transport during pending %s", async (phase) => {
+    let release!: () => void;
+    let started!: () => void;
+    // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // eslint-disable-next-line unicorn/prefer-promise-with-resolvers -- Project libraries stop at ES2022.
+    const reached = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let isRestarting = false;
+    let isActive = false;
+    const pause = async (currentPhase: string) => {
+      if (!isRestarting || currentPhase !== phase) return;
+
+      isRestarting = false;
+      started();
+      await blocked;
+    };
+    const { session, signaling } = await createConnectedSession({
+      setup: async () => {
+        await pause("setup");
+        isActive = true;
+      },
+      teardown: async () => {
+        await pause("teardown");
+        isActive = false;
+      },
+    });
+
+    isRestarting = true;
+    signaling.emit("handshake", {
+      peerKey: signaling.peerKey.get()!,
+      peerCapabilities: { transports: ["wrtc"] },
+      transport: { send: identityChannel, receive: identityChannel },
+      resumptionSecret: "0".repeat(64),
+    }, true);
+    await reached;
+    const closing = session.close({ notifyPeer: false });
+
+    release();
+    await closing;
+    expect(isActive).toBe(false);
+    expect(session.status.get()).toBe(SessionStatus.DISCONNECTED);
+  });
+});

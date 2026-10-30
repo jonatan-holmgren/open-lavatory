@@ -13,6 +13,7 @@
     "@openlv/core": "workspace:*",
     "@openlv/modal": "workspace:*",
     "@openlv/session": "workspace:*",
+    "@openlv/signaling": "workspace:*",
     "@openlv/transport": "workspace:*",
     "@tanstack/react-query": "^5.101.4",
     "dayjs": "^1.11.21",
