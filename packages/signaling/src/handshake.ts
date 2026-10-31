@@ -135,6 +135,8 @@ export const createHandshake = async (
   const accept = async (attempt: Attempt, remoteCapabilities: PeerCapabilities) => {
     if (isStopped || !attempt.peer || !attempt.channels) return;
 
+    if (pin && !isSameEncryptionKey(attempt.peer, pin)) return;
+
     const restart = isCompleted;
 
     pin = attempt.peer;
