@@ -81,7 +81,7 @@ afterEach(() => createSessionMock.mockReset());
 describe("provider automatic session restoration", () => {
   it("restores the stored pairing and reaches connected state on initialization", async () => {
     const backingStorage = createStorage();
-    const seededStorage = createProviderStorage({ storage: backingStorage });
+    const seededStorage = createProviderStorage({ storage: backingStorage, sessionStorage: backingStorage });
 
     const savedParameters = await createSavedParameters();
 
@@ -90,7 +90,7 @@ describe("provider automatic session restoration", () => {
 
     createSessionMock.mockResolvedValue(restored);
 
-    const provider = createProvider({ storage: backingStorage });
+    const provider = createProvider({ storage: backingStorage, sessionStorage: backingStorage });
 
     await provider.status.until(status => status === ProviderStatus.CONNECTED);
 
@@ -100,14 +100,14 @@ describe("provider automatic session restoration", () => {
 
   it("persists a restored pairing even with auto-reconnect disabled", async () => {
     const backingStorage = createStorage();
-    const seededStorage = createProviderStorage({ storage: backingStorage });
+    const seededStorage = createProviderStorage({ storage: backingStorage, sessionStorage: backingStorage });
     const savedParameters = await createSavedParameters();
 
     seededStorage.setSettings({ ...seededStorage.getSettings(), autoReconnect: false });
     seededStorage.setSession(savedParameters);
     createSessionMock.mockResolvedValue(createReadySession(savedParameters));
 
-    const provider = createProvider({ storage: backingStorage });
+    const provider = createProvider({ storage: backingStorage, sessionStorage: backingStorage });
 
     await provider.restoreSession();
     const options = createSessionMock.mock.calls[0]![3] as {
@@ -121,7 +121,7 @@ describe("provider automatic session restoration", () => {
 
   it("does not restore an older pairing after a fresh pairing with auto-reconnect disabled", async () => {
     const backingStorage = createStorage();
-    const seededStorage = createProviderStorage({ storage: backingStorage });
+    const seededStorage = createProviderStorage({ storage: backingStorage, sessionStorage: backingStorage });
     const savedParameters = await createSavedParameters();
     const freshParameters = { ...await createSavedParameters(), sessionId: "mytestsession222" };
     const freshSession = createReadySession(freshParameters);
@@ -130,7 +130,7 @@ describe("provider automatic session restoration", () => {
     seededStorage.setSession(savedParameters);
     createSessionMock.mockResolvedValue(freshSession);
 
-    const provider = createProvider({ storage: backingStorage });
+    const provider = createProvider({ storage: backingStorage, sessionStorage: backingStorage });
 
     expect(provider.storage.getSession()).toEqual(savedParameters);
     expect(createSessionMock).not.toHaveBeenCalled();
@@ -140,7 +140,7 @@ describe("provider automatic session restoration", () => {
     expect(provider.session.get()).toBe(freshSession);
     expect(provider.storage.getSession()).toBeUndefined();
 
-    const reopenedProvider = createProvider({ storage: backingStorage });
+    const reopenedProvider = createProvider({ storage: backingStorage, sessionStorage: backingStorage });
 
     await expect(reopenedProvider.restoreSession()).rejects.toThrow("No saved session to restore");
     expect(createSessionMock).toHaveBeenCalledTimes(1);
@@ -148,7 +148,7 @@ describe("provider automatic session restoration", () => {
 
   it("clears a saved pairing when terminal closure invalidates it", async () => {
     const backingStorage = createStorage();
-    const seededStorage = createProviderStorage({ storage: backingStorage });
+    const seededStorage = createProviderStorage({ storage: backingStorage, sessionStorage: backingStorage });
 
     const savedParameters = await createSavedParameters();
 
@@ -163,7 +163,7 @@ describe("provider automatic session restoration", () => {
     };
     createSessionMock.mockResolvedValue(failed);
 
-    const provider = createProvider({ storage: backingStorage });
+    const provider = createProvider({ storage: backingStorage, sessionStorage: backingStorage });
 
     await expect(provider.restoreSession()).rejects.toThrow("Saved pairing invalidated");
     expect(provider.storage.getSession()).toBeUndefined();
@@ -171,7 +171,7 @@ describe("provider automatic session restoration", () => {
 
   it("keeps a saved pairing when a transient resume failure does not invalidate it", async () => {
     const backingStorage = createStorage();
-    const seededStorage = createProviderStorage({ storage: backingStorage });
+    const seededStorage = createProviderStorage({ storage: backingStorage, sessionStorage: backingStorage });
 
     const savedParameters = await createSavedParameters();
 
@@ -185,7 +185,7 @@ describe("provider automatic session restoration", () => {
     };
     createSessionMock.mockResolvedValue(failed);
 
-    const provider = createProvider({ storage: backingStorage });
+    const provider = createProvider({ storage: backingStorage, sessionStorage: backingStorage });
 
     await expect(provider.restoreSession()).rejects.toThrow("Session resumption timed out");
     expect(provider.storage.getSession()).toEqual(savedParameters);
@@ -193,7 +193,7 @@ describe("provider automatic session restoration", () => {
 
   it("clears a deterministically invalid saved session before retrying restore", async () => {
     const backingStorage = createStorage();
-    const seededStorage = createProviderStorage({ storage: backingStorage });
+    const seededStorage = createProviderStorage({ storage: backingStorage, sessionStorage: backingStorage });
     const savedParameters = await createSavedParameters();
 
     seededStorage.setSession(savedParameters);
@@ -201,7 +201,7 @@ describe("provider automatic session restoration", () => {
       new InvalidSavedSessionError("Saved session key material is inconsistent"),
     );
 
-    const provider = createProvider({ storage: backingStorage });
+    const provider = createProvider({ storage: backingStorage, sessionStorage: backingStorage });
 
     await expect(provider.restoreSession()).rejects.toThrow(
       "Saved session key material is inconsistent",

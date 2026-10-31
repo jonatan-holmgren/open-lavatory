@@ -35,8 +35,8 @@ const chainId = await provider.request({ method: 'eth_chainId' })
 ## Parameters
 
 - `config?`: protocol defaults (signaling + transport)
-- `storage?`: settings and saved-session backend (defaults to localStorage where available)
-- `sessionStorage?`: separate saved-session backend for per-tab isolation (defaults to sessionStorage when available)
+- `storage?`: settings backend (defaults to localStorage where available, otherwise in-memory)
+- `sessionStorage?`: saved-session backend (defaults to browser sessionStorage where available, otherwise in-memory)
 - `openModal?`: optional UI hook used by connector/modal integrations
 
 ## Provider helpers

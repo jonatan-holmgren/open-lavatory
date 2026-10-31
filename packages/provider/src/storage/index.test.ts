@@ -27,9 +27,21 @@ const createParameters = async (): Promise<SessionConnectionParameters> => {
 };
 
 describe("saved session storage", () => {
-  it("writes a versioned envelope and reads it back", async () => {
+  it("does not use the settings backend when sessionStorage is unavailable", async () => {
     const backing = createStorage();
     const storage = createProviderStorage({ storage: backing });
+    const parameters = await createParameters();
+
+    storage.setSession(parameters);
+
+    expect(storage.getSession()).toEqual(parameters);
+    expect(backing.getItem(SESSION_STORAGE_KEY)).toBeNull();
+    expect(createProviderStorage({ storage: backing }).getSession()).toBeUndefined();
+  });
+
+  it("writes a versioned envelope and reads it back", async () => {
+    const backing = createStorage();
+    const storage = createProviderStorage({ sessionStorage: backing });
     const parameters = await createParameters();
 
     storage.setSession(parameters);
@@ -46,7 +58,7 @@ describe("saved session storage", () => {
 
   it("discards old saved records that lack peer-bound credentials", async () => {
     const backing = createStorage();
-    const storage = createProviderStorage({ storage: backing });
+    const storage = createProviderStorage({ sessionStorage: backing });
     const parameters = await createParameters();
 
     backing.setItem(SESSION_STORAGE_KEY, JSON.stringify({
@@ -69,7 +81,7 @@ describe("saved session storage", () => {
     "removes corrupt or unsupported record %s instead of returning it",
     (record) => {
       const backing = createStorage();
-      const storage = createProviderStorage({ storage: backing });
+      const storage = createProviderStorage({ sessionStorage: backing });
 
       backing.setItem(SESSION_STORAGE_KEY, record);
 
