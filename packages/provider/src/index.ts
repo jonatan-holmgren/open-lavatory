@@ -98,6 +98,7 @@ export const createProvider = (
   const [error, setError] = observable<string | undefined>(undefined);
 
   let accounts: Address[] = [];
+  let unsubscribeSessionStatus: (() => void) | undefined;
   const storage = createProviderStorage({ storage: parameters.storage });
   const sessionStorage = createSessionStorage(parameters.sessionStorage);
   const { openModal, config } = parameters;
@@ -207,6 +208,45 @@ export const createProvider = (
       setSession(next);
       setStatus(ProviderStatus.CONNECTING);
 
+      let wasConnected = false;
+
+      unsubscribeSessionStatus?.();
+
+      unsubscribeSessionStatus = next.status.subscribe((state) => {
+        if (state === SessionStatus.CONNECTED) {
+          wasConnected = true;
+
+          return;
+        }
+
+        // A failed initial handshake is handled by start()'s catch path. Once
+        // established, however, a peer close must reset the provider too.
+        if (
+          !wasConnected
+          || session.get() !== next
+          || state !== SessionStatus.DISCONNECTED
+        ) return;
+
+        unsubscribeSessionStatus?.();
+        unsubscribeSessionStatus = undefined;
+
+        try {
+          sessionStorage.clear();
+        }
+        catch (error_) {
+          log("could not clear saved session", error_);
+        }
+
+        setSession(undefined);
+        accounts = [];
+        setError(undefined);
+        setStatus(ProviderStatus.STANDBY);
+        oxEmitter.emit(
+          "disconnect",
+          new OxProvider.ProviderRpcError(4900, next.error.get() ?? "Session closed by peer"),
+        );
+      });
+
       log("session created");
       await next.connect();
       log("session connected");
@@ -276,6 +316,9 @@ export const createProvider = (
     return await start(saved.connection, saved.transport);
   };
   const closeSession = async () => {
+    const current = session.get();
+    unsubscribeSessionStatus?.();
+    unsubscribeSessionStatus = undefined;
     try {
       sessionStorage.clear();
     }
@@ -286,6 +329,14 @@ export const createProvider = (
     accounts = [];
     setError(undefined);
     setStatus(ProviderStatus.STANDBY);
+    await current?.close();
+
+    if (current) {
+      oxEmitter.emit(
+        "disconnect",
+        new OxProvider.ProviderRpcError(4900, "Session closed by provider"),
+      );
+    }
   };
 
   const request: OxProvider.from.Value<ProviderConfig>["request"] = async (
