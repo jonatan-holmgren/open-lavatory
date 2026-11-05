@@ -1,4 +1,3 @@
-
 import {
   encodeConnectionURL,
   type Observable,
@@ -11,6 +10,7 @@ import {
   SessionStatus,
 } from "@openlv/session";
 import type { PeerInfo } from "@openlv/signaling";
+import { hashPublicKey } from "@openlv/core/encryption";
 import type { TransportProtocol } from "@openlv/transport";
 import { webrtc, type WebRTCConfig } from "@openlv/transport/webrtc";
 import { Provider as OxProvider } from "ox";
@@ -25,6 +25,8 @@ import {
 } from "./rpc.js";
 import {
   createProviderStorage,
+  createSessionStorage,
+  type PersistedSession,
   type ProviderStorageParameters,
   type ProviderStorageR,
 } from "./storage/index.js";
@@ -48,7 +50,7 @@ export type OpenLVProviderParameters = Prettify<
   {
     config?: OpenLVProviderConfig;
     openModal?: (provider: OpenLVProvider) => Promise<void>;
-  } & Pick<ProviderStorageParameters, "storage">
+  } & Pick<ProviderStorageParameters, "storage" | "sessionStorage">
 >;
 
 export const ProviderStatus = {
@@ -67,6 +69,7 @@ export type ProviderConfig = {
 export type ProviderBase = {
   storage: ProviderStorageR;
   createSession: (parameters?: SessionLinkParameters) => Promise<Session>;
+  restoreSession: () => Promise<Session>;
   closeSession: () => Promise<void>;
   getAccounts: () => Promise<Address[]>;
   status: Observable<ProviderStatus>;
@@ -96,6 +99,7 @@ export const createProvider = (
 
   let accounts: Address[] = [];
   const storage = createProviderStorage({ storage: parameters.storage });
+  const sessionStorage = createSessionStorage(parameters.sessionStorage);
   const { openModal, config } = parameters;
   const walletRpc = createWalletRpcClient(async (payload) => {
     const current = session.get();
@@ -143,8 +147,35 @@ export const createProvider = (
 
     return p && s ? { p, s } : undefined;
   };
+  const configuredWebRTCSettings = () => {
+    const settings: NonNullable<PersistedSession["transport"]> = {};
+    const servers = config?.transport?.s?.webrtc?.iceServers ?? [];
+    const stun: string[] = [];
+    const turn: NonNullable<PersistedSession["transport"]["turn"]> = [];
 
-  const start = async (parameters?: SessionLinkParameters) => {
+    for (const server of servers) {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      for (const url of urls) {
+        if (url.startsWith("stun:")) stun.push(url);
+        else {
+          turn.push({
+            urls: url,
+            ...(server.username !== undefined && { username: server.username }),
+            ...(server.credential !== undefined && { credential: String(server.credential) }),
+          });
+        }
+      }
+    }
+    if (stun.length) settings.stun = stun;
+    if (turn.length) settings.turn = turn;
+    return settings;
+  };
+
+
+  const start = async (
+    parameters?: SessionLinkParameters,
+    resumeTransport?: PersistedSession["transport"],
+  ) => {
     setError(undefined);
     setStatus(ProviderStatus.CREATING);
     const linkParameters = parameters ?? defaultLinkParameters();
@@ -156,7 +187,7 @@ export const createProvider = (
     // Stored user settings win over constructor config; both fall back to the
     // transport's built-in defaults, so an empty list must stay undefined
     // rather than become an empty iceServers array.
-    const stored = storage.getSettings().transport?.s?.webrtc;
+    const stored = resumeTransport ?? storage.getSettings().transport?.s?.webrtc;
     const iceServers = [
       ...stored?.stun?.map(urls => ({ urls })) ?? [],
       ...stored?.turn ?? [],
@@ -179,8 +210,7 @@ export const createProvider = (
       log("session created");
       await next.connect();
       log("session connected");
-      const handshakeParameters = next.getHandshakeParameters();
-      const url = encodeConnectionURL(handshakeParameters);
+      const url = encodeConnectionURL(next.getHandshakeParameters());
 
       log("session url", url);
 
@@ -192,7 +222,21 @@ export const createProvider = (
       if (settled !== SessionStatus.CONNECTED) {
         throw new Error(next.error.get() ?? "Session failed to connect");
       }
+      const resumeParameters = next.getResumeParameters();
 
+      try {
+        sessionStorage.set({
+          revision: 1,
+          sessionURI: url,
+          connection: resumeParameters,
+          transport: stored ?? configuredWebRTCSettings(),
+        });
+      }
+      catch (error_) {
+        // Persistence is optional and must not turn a live connection into a
+        // failed one when storage is unavailable or quota-limited.
+        log("could not persist resumable session", error_);
+      }
       log("session linked");
 
       accounts = [...await walletRpc.call({ method: "eth_accounts" })];
@@ -216,8 +260,28 @@ export const createProvider = (
       throw error_;
     }
   };
+  const restoreSession = async () => {
+    const saved = sessionStorage.get();
+
+    if (!saved) throw new Error("No valid saved session to restore");
+
+    const localHash = await hashPublicKey(saved.connection.keyPair.publicKey);
+    const peerHash = await hashPublicKey(saved.connection.peerKey);
+
+    if (localHash !== saved.connection.h && peerHash !== saved.connection.h) {
+      sessionStorage.clear();
+      throw new Error("Saved peer key does not match the session URI");
+    }
+
+    return await start(saved.connection, saved.transport);
+  };
   const closeSession = async () => {
-    await session.get()?.close();
+    try {
+      sessionStorage.clear();
+    }
+    catch (error_) {
+      log("could not clear saved session", error_);
+    }
     setSession(undefined);
     accounts = [];
     setError(undefined);
@@ -286,11 +350,36 @@ export const createProvider = (
       [...await walletRpc.call({ method: "eth_accounts" })]
     ),
     createSession: start,
+    restoreSession,
     closeSession,
     status,
     error,
     session,
   });
+
+  if (storage.getSettings().autoReconnect) {
+    const saved = sessionStorage.get();
+    if (saved) {
+      void (async () => {
+        const localHash = await hashPublicKey(saved.connection.keyPair.publicKey);
+
+        if (localHash === saved.connection.h) {
+          await restoreSession();
+
+          return;
+        }
+
+        const peerHash = await hashPublicKey(saved.connection.peerKey);
+
+        if (peerHash !== saved.connection.h) {
+          sessionStorage.clear();
+          throw new Error("Saved peer key does not match the session URI");
+        }
+      })().catch((error_) => {
+        log("automatic session restore failed", error_);
+      });
+    }
+  }
 
   return oxProvider as OpenLVProvider;
 };
