@@ -31,6 +31,8 @@ export type SessionConnectionParameters = SessionHandshakeParameters & {
   keyPair: KeyPair;
   // The relying party's public key
   peerKey: PublicKey;
+  // Transport selected during the previous connection.
+  selectedTransportId: string;
 };
 
 export type SessionCreationParameters = Pick<
