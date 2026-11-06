@@ -67,7 +67,7 @@ openlv://<sessionId>@1?h=<h>&k=<k>&p=<p>&s=<s>
 ```
 
 All fields shown are REQUIRED for deterministic interoperability.
-The URI MAY carry more parameters, such as `h2`, `k2`, `s2`, see [Forwards Compatability](#forwards-compatability)
+The URI MAY carry more parameters, such as `h2`, `k2`, `s2`, see [Forwards Compatibility](#forwards-compatability).
 
 - `sessionId`: 16 URL-safe characters matching `^[A-Za-z0-9_-]{16}$`
 - `h`: 16 lowercase hexadecimal characters matching `^[0-9a-f]{16}$`
@@ -339,7 +339,7 @@ Wallets and dapps that do not implement `openlv` remain unaffected.
 
 Version 1 compatibility depends on the `openlv://` URI shape, URI version `@1`, the `sessionId`/`h`/`k` constraints, signaling frame markers, signaling message types, and the session envelope.
 
-## Forwards Compatability
+## Forwards Compatibility
 
 In anticipation of the post-quantum cryptography era, and potential sequencing improvements, implementors must anticipate additional URL parameters such as `h2`, `k2` and `s2`, similarly the `rev` key in `flash`.
 This allows for potential minor revisions, therefore not requiring a `@1` -> `@2` uri version bump, to take place while maintaining graceful interop with yet-to-update clients.
@@ -385,7 +385,7 @@ const session = await connectSession(
 
 The session URI contains sensitive bootstrap material and MUST be handled as a secret until the handshake completes.
 
-Session establishment is first-come-first-serve; a shoulder-surfing attacker could frontrun QR code scanning but not man-in-the-middle; this would immediately be noticable to the user as their device would fail to connect.
+Session establishment is first-come-first-serve; a shoulder-surfing attacker could frontrun QR code scanning but not man-in-the-middle; this would immediately be noticeable to the user as their device would fail to connect.
 
 An attacker who can replace the URI shown is assumed to already have control over the dApp and is therefore out of scope of this specification.
 
