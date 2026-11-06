@@ -25,7 +25,7 @@ Every signaling frame published to the relay is a single string:
 | Position | Values | Meaning |
 |----------|--------|---------|
 | `prefix` | `h` | Encrypted with the **handshake key** `k` from the session URI (AES-GCM) |
-| | `x` | Encrypted to the **peer's public key** (X25519 + XSalsa20-Poly1305) |
+| | `x` | Encrypted to the **peer's public key** (X25519 key agreement, HKDF-SHA256, and AES-256-GCM) |
 | `recipient` | `h` | Intended for the host |
 | | `c` | Intended for the client |
 | `ciphertext` | base64 | The encrypted JSON packet |

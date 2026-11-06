@@ -25,6 +25,7 @@ type Page =
   | { path: '/'; render: 'static' }
   | { path: '/try'; render: 'static' }
   | { path: '/wallets'; render: 'static' }
+  | { path: '/wallets/dart'; render: 'static' }
   | { path: '/wallets/migrate'; render: 'static' }
   | { path: '/wallets/react-native'; render: 'static' }
 

@@ -6,12 +6,18 @@
 It is also an implementor of the [Unified Push](https://unifiedpush.org/) standard.
 
 ```typescript
-import { ntfy } from '@openlv/signaling/ntfy';
+import { createSession } from '@openlv/session';
+import { webrtc } from '@openlv/transport/webrtc';
 
 const session = await createSession({
     p: 'ntfy',
     s: 'https://ntfy.sh/'
-}, ntfy);
+}, [webrtc()], async (message) => {
+  const id = typeof message === 'object' && message !== null && 'id' in message
+    ? message.id
+    : null;
+  return { jsonrpc: '2.0', id, result: 'ok' };
+});
 ```
 ## URL Format
 

@@ -3,12 +3,18 @@
 MQTT is a lightweight publish/subscribe messaging protocol for connecting remote devices with minimal network bandwidth
 
 ```typescript
-import { mqtt } from '@openlv/signaling/mqtt';
+import { createSession } from '@openlv/session';
+import { webrtc } from '@openlv/transport/webrtc';
 
 const session = await createSession({
     p: 'mqtt',
     s: 'wss://test.mosquitto.org:8081/mqtt'
-}, mqtt);
+}, [webrtc()], async (message) => {
+  const id = typeof message === 'object' && message !== null && 'id' in message
+    ? message.id
+    : null;
+  return { jsonrpc: '2.0', id, result: 'ok' };
+});
 ```
 
 ## URL Format
