@@ -3,9 +3,19 @@
 [Gun](https://gun.eco/docs) is a decentralized database that is used to store and retrieve data.
 
 ```typescript
-import { gundb } from '@openlv/signaling/gundb';
+import { createSession } from '@openlv/session';
+import { webrtc } from '@openlv/transport/webrtc';
 
-const session = await createSession({ p: 'gundb', s: 'wss://try.axe.eco/gun' }, gundb);
+const session = await createSession(
+  { p: 'gun', s: 'wss://try.axe.eco/gun' },
+  [webrtc()],
+  async (message) => {
+    const id = typeof message === 'object' && message !== null && 'id' in message
+      ? message.id
+      : null;
+    return { jsonrpc: '2.0', id, result: 'ok' };
+  },
+);
 ```
 
 ## URL Format

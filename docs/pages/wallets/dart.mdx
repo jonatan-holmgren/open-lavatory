@@ -1,0 +1,58 @@
+# Dart / Flutter Wallets
+
+The `openlv` Dart package lets a wallet accept a connection URI from a dApp, handle its JSON-RPC requests, and send responses over an OpenLV session. The package also supports the dApp role.
+
+## Install
+
+Add the package to a Dart or Flutter project:
+
+:::code-group
+
+```bash [dart]
+dart pub add openlv
+```
+
+```bash [flutter]
+flutter pub add openlv
+```
+
+:::
+
+## Connect
+
+Create a wallet from the URI received from the dApp, connect, then wait for the peer-to-peer link before using the session:
+
+```dart
+import 'package:openlv/openlv.dart';
+
+final wallet = await OpenLv.wallet(
+  'openlv://...', // connection URI from the dApp
+  info: PeerInfo(
+    identity: 'com.example.wallet',
+    name: 'Example Wallet',
+    icon: 'data:image/png;base64,...',
+  ),
+  onRequest: (message) async {
+    final request = message as Map<String, dynamic>;
+
+    // Implement wallet-specific approval and method handling here.
+    return {
+      'jsonrpc': '2.0',
+      'id': request['id'],
+      'error': {
+        'code': -32601,
+        'message': 'Method not found',
+      },
+    };
+  },
+);
+
+await wallet.connect();
+await wallet.waitForLink();
+
+// Keep the wallet session active while the dApp is connected.
+// When the user disconnects, close the session:
+await wallet.close();
+```
+
+`info` is optional and identifies the wallet to the dApp. The `onRequest` callback receives JSON-RPC requests and should return a JSON-RPC response with the same `id`. Implement wallet-specific approval and method handling in this callback.

@@ -56,6 +56,7 @@ const SDKS: Sdk[] = [
     marks: ["dart"],
     install: "dart pub add openlv",
     links: [
+      { label: "Docs", href: "/wallets/dart" },
       { label: "pub.dev", href: "https://pub.dev/packages/openlv" },
       { label: "GitHub", href: "https://github.com/open-lavatory/openlv-dart" },
     ],

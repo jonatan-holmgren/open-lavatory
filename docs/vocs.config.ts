@@ -51,7 +51,16 @@ export default defineConfig({
         },
         {
           text: "Mobile Wallets",
-          link: "/wallets/react-native",
+          items: [
+            {
+              text: "React Native",
+              link: "/wallets/react-native",
+            },
+            {
+              text: "Dart",
+              link: "/wallets/dart",
+            },
+          ],
         },
         {
           text: "Migrating from WalletConnect",
